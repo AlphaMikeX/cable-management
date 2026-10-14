@@ -27,29 +27,29 @@
 ### Task 1: Document model, graph and connector catalogue
 Files: src/lib.rs, src/model.rs, src/ports.rs, tests/model.rs.
 Interfaces: Project::connect(PortRef, Target, bool, bool) -> Result<Id, String>; Project::validate() -> Result<(), String>; Project::route_to_endpoint(Id) -> Vec<PortRef>.
-- [ ] Write tests for physical port occupancy, unique IDs, compatible families, adapter opt-in, acyclic hierarchy, supplementary links, endpoint routes and deletion.
-- [ ] Observe missing behavior, implement model and catalogue, run cargo test --no-default-features.
-- [ ] Commit verified model.
+- [x] Write tests for physical port occupancy, unique IDs, compatible families, adapter opt-in, acyclic hierarchy, supplementary links, endpoint routes and deletion.
+- [x] Observe missing behavior, implement model and catalogue, run cargo test --no-default-features.
+- [x] Commit verified model.
 
 ### Task 2: Geometry, projection and storage
 Files: src/geometry.rs, src/tree.rs, src/storage.rs, tests/geometry.rs, tests/storage.rs.
 Interfaces: face_frame(part, face, uv) returns centre and orthonormal tangents; project(point, camera) returns position/depth; tree::layout(&Project) returns node positions; storage::save/load use Path and Result.
-- [ ] Write geometry/resize/route/tree and versioned JSON/safe replacement tests and observe missing behavior.
-- [ ] Implement the Rust transforms, cycle-safe layout and validated atomic storage; run full core tests.
-- [ ] Commit verified core services.
+- [x] Write geometry/resize/route/tree and versioned JSON/safe replacement tests and observe missing behavior.
+- [x] Implement the Rust transforms, cycle-safe layout and validated atomic storage; run full core tests.
+- [x] Commit verified core services.
 
 ### Task 3: Native application and physical editor
 Files: src/main.rs, src/ui.rs, src/scene.rs.
 Consumes: Project, catalogue, geometry, storage, tree interfaces above.
-- [ ] Implement direct node list, full tree and level mode, edit/view controls, breadcrumb navigation, part/port/cable editor, port picking and drag, smooth views and zoom.
-- [ ] Add undo/redo, save/open protection and separate recovery.
-- [ ] Compile and run GUI smoke tests against the acceptance chain and file reopening.
-- [ ] Commit native app and documented controls.
+- [x] Implement direct node list, full tree and level mode, edit/view controls, breadcrumb navigation, part/port/cable editor, port picking and drag, smooth views and zoom.
+- [x] Add undo/redo, save/open protection and separate recovery.
+- [x] Compile and run GUI smoke tests against the acceptance chain and file reopening.
+- [x] Commit native app and documented controls.
 
 ### Task 4: Windows release and delivery
 Files: .cargo/config.toml, .github/workflows/windows.yml, README.md, docs/FORMAT.md.
-- [ ] Run cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test.
-- [ ] Build locked release for x86_64-pc-windows-gnu and inspect PE imports.
-- [ ] Run Windows executable under Wine if available and record verification honestly.
-- [ ] Perform independent whole-project code review and fix important findings.
-- [ ] Push source and build instructions to GitHub, upload only the executable to the confirmed Drive folder, and read back folder contents.
+- [x] Run cargo fmt --check, cargo clippy --all-targets -- -D warnings and cargo test.
+- [x] Build locked release for x86_64-pc-windows-gnu and inspect PE imports.
+- [x] Run Windows executable under Wine if available and record verification honestly.
+- [x] Perform independent whole-project code review and fix important findings.
+- [x] Push source and build instructions to GitHub, upload only the executable to the confirmed Drive folder, and read back folder contents.
