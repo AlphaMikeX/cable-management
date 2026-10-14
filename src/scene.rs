@@ -97,6 +97,26 @@ fn inside(point: Pos2, polygon: &[Pos2]) -> bool {
     true
 }
 
+fn pick_socket(
+    sockets: &[Socket],
+    point: Pos2,
+    selected: Option<Id>,
+    radius: f32,
+) -> Option<&Socket> {
+    sockets
+        .iter()
+        .filter(|s| inside(point, &s.points) || s.center.distance(point) < radius)
+        .min_by(|a, b| {
+            (Some(a.id) != selected)
+                .cmp(&(Some(b.id) != selected))
+                .then_with(|| {
+                    a.center
+                        .distance(point)
+                        .total_cmp(&b.center.distance(point))
+                })
+        })
+}
+
 pub fn draw(
     ui: &mut egui::Ui,
     project: &Project,
@@ -233,12 +253,9 @@ pub fn draw(
     let pointer = response
         .hover_pos()
         .or_else(|| ui.input(|i| i.pointer.interact_pos()));
-    let hovered = pointer.filter(|p| rect.contains(*p)).and_then(|p| {
-        sockets
-            .iter()
-            .filter(|s| inside(p, &s.points) || s.center.distance(p) < 9.)
-            .min_by(|a, b| a.center.distance(p).total_cmp(&b.center.distance(p)))
-    });
+    let hovered = pointer
+        .filter(|p| rect.contains(*p))
+        .and_then(|p| pick_socket(&sockets, p, selected, 9.));
     let mut event = SceneEvent::default();
     if response.clicked()
         && let Some(socket) = hovered
@@ -248,12 +265,7 @@ pub fn draw(
     if response.drag_started_by(egui::PointerButton::Primary) && editing {
         // egui reports drag-start after threshold: use the original press point.
         let press = ui.input(|i| i.pointer.press_origin());
-        let hit = press.and_then(|p| {
-            sockets
-                .iter()
-                .filter(|s| inside(p, &s.points) || s.center.distance(p) < 12.)
-                .min_by(|a, b| a.center.distance(p).total_cmp(&b.center.distance(p)))
-        });
+        let hit = press.and_then(|p| pick_socket(&sockets, p, selected, 12.));
         if let Some(socket) = hit {
             state.drag_port = Some(socket.id);
             event.selected = Some(socket.id);
@@ -403,6 +415,29 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selected_port_can_be_dragged_when_new_ports_overlap() {
+        let sockets: Vec<_> = (1..=2)
+            .map(|id| Socket {
+                id,
+                center: Pos2::ZERO,
+                points: vec![
+                    Pos2::new(-5., -2.),
+                    Pos2::new(5., -2.),
+                    Pos2::new(5., 2.),
+                    Pos2::new(-5., 2.),
+                ],
+                name: String::new(),
+                kind: String::new(),
+                connection: None,
+                depth: 0.,
+            })
+            .collect();
+        assert_eq!(
+            pick_socket(&sockets, Pos2::ZERO, Some(2), 12.).unwrap().id,
+            2
+        );
+    }
     #[test]
     fn oblique_socket_is_not_painted_under_its_supporting_face() {
         let p = Project::demo();
