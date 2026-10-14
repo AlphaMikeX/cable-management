@@ -21,7 +21,9 @@ fn both_ends_of_a_cable_are_reserved_and_failure_is_atomic() {
     assert_eq!(before, serde_json::to_string(&p).unwrap());
     if let Target::Port(to) = link.to {
         assert!(p.is_occupied(to));
-    } else { panic!("demo must contain the hub cable"); }
+    } else {
+        panic!("demo must contain the hub cable");
+    }
 }
 
 #[test]

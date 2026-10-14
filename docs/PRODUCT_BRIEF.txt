@@ -1,0 +1,89 @@
+CABLE MANAGEMENT — UTVECKLINGSPROMPT
+Version: 1.0 | 2026-10-14
+
+ROLL OCH UPPDRAG
+Du är en senior Rust-utvecklare med kompetens inom native Windows-applikationer, UX, 3D-grafik, datamodellering och automatiserad testning. Utveckla en fungerande Windows-app som heter "Cable Management". Börja från ett eventuellt tomt GitHub-repository. Implementera stegvis men leverera verkligt körbar kod, inte enbart mockups eller designförslag.
+
+PRODUKTVISION
+Cable Management är ett visuellt verktyg för att dokumentera hur fysisk utrustning och kablar är anslutna, framför allt datorer, USB-hubbar, ljudmixrar och deras tillbehör. Användaren ska snabbt kunna avgöra vilken EXAKT fysisk port en kabel sitter i, utan att behöva följa kabeln bakom skrivbordet. Verktyget ska också göra det enkelt att återansluta all utrustning efter exempelvis rengöring eller flytt. Det är inte ett generellt CAD-program och inte ett automatiskt USB-inventeringsverktyg.
+
+TEKNISKA HUVUDKRAV
+- Appen ska vara en fristående, native Windows-desktopapp med Rust som kodbas. Inget Tauri, Electron, HTML, CSS, JavaScript eller WebView för gränssnittet.
+- Använd i första hand egui/eframe för skrivbordsgränssnittet, och välj en välfungerande Rust-baserad 3D-renderare/integration för modellvyn (exempelvis wgpu eller annan motiverad lösning). Bevy är ett möjligt alternativ, men inte ett obligatoriskt krav. Välj en arkitektur som är enkel att vidareutveckla och ger låg resursförbrukning.
+- Kod, datamodell, rendering och persistent lagring ska hållas tydligt åtskilda. Både träd- och nivåvyn ska använda exakt samma underliggande anslutningsdata.
+- Appen ska fungera lokalt utan molntjänst eller internetkrav och kunna byggas till en Windows .exe.
+- Prioritera korrekthet, responsivitet, tydlig UX och förvaltbar kod. Testa kritisk logik automatiskt.
+
+GRUNDBEGREPP OCH DATAMODELL
+1. Anslutningsnod: utrustning med portar, som PC, USB-hubb eller ljudmixer. Denna representeras av en användardefinierad fysisk modell med portar på rätt positioner. En nod kan anslutas vidare till en eller flera andra anslutningsnoder.
+2. Slutpunkt (end node): ansluten utrustning som i detta sammanhang inte behöver ritas upp med egna portar, till exempel webbkamera, mikrofon eller Stream Deck. Den visas endast som en kort etikett/namn på den port där den är ansluten. Slutpunkter ska alltså INTE automatiskt bli egna ritade lådor.
+3. Port: en fysisk anslutning som tillhör exakt en anslutningsnod, med porttyp, namn/nummer, läge på modellen, orientering och eventuell metadata.
+4. Anslutning: förbinder en port med en slutpunkt eller med en port på en annan anslutningsnod. Representera kabel-/kopplingsvägar så att användaren kan följa en anslutning genom flera noder, exempelvis PC -> USB-hubb -> webbkamera.
+5. Projekt: sparad samling av noder, portar, slutpunkter och anslutningar. Stöd minst en huvudnod/rot (ofta datorn) och utforma modellen så att fler rötter kan hanteras senare. Förväxla inte noder och slutpunkter.
+
+SKAPA OCH REDIGERA FYSISKA ANSLUTNINGSNODER
+- Användaren skapar själv en enhet och ger den ett namn, exempelvis "AMX-PC", "USB-hubb på skrivbordet" eller "Ljudmixer".
+- Enheten ska ha en schematisk men så verklighetstrogen 3D-form som är praktiskt möjlig att bygga via ett FÖRENKLAT gränssnitt. Börja med justerbara boxar och enkla geometriska byggstenar som kan kombineras för ovanligare former. Detta ska inte vara ett fullständigt CAD-program.
+- Användaren ska kunna anpassa mått och form, även i efterhand, utan att portarnas fysiska mått oavsiktligt förvrängs. Portplacering ska följa relevant yta i modellen.
+- Alla portar dras/placeras från ett FÖRDEFINIERAT PORTBIBLIOTEK. Användaren ska aldrig behöva rita portsymbolerna manuellt.
+- Varje porttyp ska ha igenkännbar form och en konsekvent gemensam storleksskala, så att exempelvis USB-A, USB-C, HDMI och XLR har rimliga storleksförhållanden. Lägg separata visuella hjälpmedel för små portar (zoom, tydlig markering, läsbara etiketter) utan att bryta den fysiska skalan.
+- Portarna ska kunna placeras på modellens olika sidor/ytor och roteras till den orientering som motsvarar verkligheten (horisontellt, vertikalt osv.). Flera likadana portar ska kunna placeras individuellt, så att t.ex. "HDMI 2" kan identifieras entydigt utifrån sin position.
+- Porttyper bör initialt innefatta USB-A, USB-B, USB-C, mini/micro-USB, HDMI, DisplayPort, mini-DisplayPort, DVI, VGA, RJ45/Ethernet, 3,5 mm tele, 6,35 mm tele, XLR, RCA, optisk S/PDIF/TOSLINK och vanliga strömportar. Gör biblioteket utbyggbart, och skilj kontaktform från eventuell standardversion/kapacitet där det behövs.
+
+3D-VISNING OCH ROTATION
+- Varje anslutningsnod har en standardvy som användaren själv väljer, exempelvis baksidan av en dator.
+- Med tydliga kontroller ska användaren kunna växla till fram-, bak-, topp-, botten- och sidovy där det är relevant. Övergångarna ska vara MJUKT ANIMERADE så att användaren förstår hur modellen roteras och vilken sida som visas.
+- Stöd även valfri rotation med musen samt zoom, men standardvyn och knapparna för de fasta vyerna ska vara enkla och förutsägbara.
+- Portarnas positioner och orienteringar ska vara stabila när modellen roteras. När användaren pekar på eller väljer en port ska dess namn, typ och aktuella anslutning kunna visas.
+- 3D-vyn är ett sätt att identifiera de fysiska portarna, inte ett separat projekt eller ett annat dataformat.
+
+TVÅ ALTERNATIVA NAVIGERINGSLÄGEN (VÄXLA MED TOGGLE ÖVERST)
+A. HELA TRÄDET: Visa hela anslutningshierarkin från rot-/huvudnoden och nedåt, som ett familjeträd med tydliga förgreningar till hubbar och andra anslutningsnoder. Slutpunkter visas som enkla etiketter vid rätt portar. Användaren ska kunna zooma och panorera i hela trädet. INGEN expandera/kollapsa-interaktion som grundläggande navigationskoncept; hela trädet ska synas i detta läge.
+B. NIVÅ FÖR NIVÅ: Visa en anslutningsnod åt gången med dess portar och det som sitter i varje port. En slutpunkt visas som etikett. Om en port leder vidare till en annan anslutningsnod ska användaren kunna klicka sig till just den noden, och där fortsätta till nästa. Visa enkel väg tillbaka eller brödsmulenavigering. Det ska inte vara ett expanderande träd.
+- De två lägena är alternativa presentationer av samma projekt. En ändring ska synas i båda lägena utan duplicering.
+- En VÄNSTERSPALT visar en enkel direktvalslista över alla anslutningsnoder (de med portar), t.ex. dator, USB-hubb, ljudmixer. Klick på en nod hoppar direkt till den. Sidolistan ska inte behöva lista varje kamera/mikrofon som en egen navigeringsnod.
+
+ANSLUTNINGAR OCH KÄRNFLÖDEN
+- Skapa PC-nod, forma chassit, lägg ut portar i korrekt fysisk layout (exempelvis på baksidan, framsidan och ovansidan).
+- Skapa USB-hubb med korrekt layout och portar.
+- Anslut hubbens uppströmsport till en angiven port på datorn.
+- Koppla en "Webbkamera" som slutpunkt till exempelvis USB-hubbens tredje USB-A-port.
+- Koppla på liknande sätt andra slutpunkter (Stream Deck, mikrofon osv.) eller andra portförsedda noder (t.ex. ljudmixer).
+- Vid klick på en port ska det vara omedelbart begripligt vad som är anslutet där, inklusive portidentitet på båda sidor när en annan nod är inkopplad.
+- Det ska gå att följa vägen till en slutpunkt från huvudnoden och att hitta portens fysiska position vid felsökning och återinkoppling.
+- Förhindra oavsiktliga dubbelbokningar av samma fysiska port, orimliga kopplingar och oavsiktliga cykler i en ren trädprojektion. Håll grundmodellen tillräckligt flexibel för att verklig kabeldragning inte alltid är ett perfekt träd.
+
+ANVÄNDARUPPLEVELSE
+- En tydlig skillnad mellan visningsläge och redigeringsläge. Ändringar i modell, portplacering, etiketter och kablage ska vara begripliga och inte ske oavsiktligt.
+- Det ska gå att flytta/placera portar med musen, finjustera position och välja rotation via kontroller (också utan exakt musprecision).
+- Projektet ska kunna sparas och öppnas igen med alla enheter, 3D-former, portar, kopplingar och standardvyer intakta. Använd ett dokumenterat, versionerat lokalt format (t.ex. JSON) och överväg automatisk sparning/återställning, men skydda mot dataförlust.
+- Appen ska vara responsiv även med ett lite större antal noder och portar. Ge tydliga användbara felmeddelanden.
+
+AVGRÄNSNINGAR
+- Ingen automatisk USB-detektering, skanning av datorns hårdvara eller nätverksinventering behövs till att börja med.
+- Ingen import av fotografier som bakgrund i första versionen. Användaren vill själv bygga upp enkla 3D-former.
+- Inget krav på onlinekonton, databas-server, synkronisering eller webbapp.
+- Ingen obligatorisk möjlighet att fälla ut och kollapsa grenar; trädvyn är HELA trädet eller så byter man till NIVÅVIS navigering.
+- Undvik att varje periferienhet blir en egen box. En slutpunkt är normalt en ETIKETT på en port.
+
+GENOMFÖRANDE OCH LEVERANS
+1. Inspektera repository och klargör aktuell struktur. Om tomt: initiera projektet med Cargo och rimlig modulstruktur.
+2. Välj och dokumentera native Rust-GUI/3D-stack. Prioritera egui/eframe med välmotiverad Rust-baserad renderare. Gör ingen övergång till webbteknik utan uttryckligt godkännande.
+3. Bygg först en fungerande vertikal prototyp som går att köra på Windows: en dator, en USB-hubb, några definierade portar, en slutpunkt, sparad anslutning och nivåvis navigering. Den ska demonstrera en verklig användbar kedja.
+4. Lägg till trädvyn med pan/zoom och direktnavigeringen i vänsterspalten.
+5. Lägg till full porteditor och 3D-modellering/rotation med mjuka animeringar och valbara standardvyer. Prioritera riktiga portar på rätt ytor före visuell utsmyckning.
+6. Inför persistent lagring och testning av bl.a. portidentitet, anslutningsintegritet och laddning/sparning; dokumentera kör- och bygginstruktioner för Windows.
+7. Fortsätt iterativt; redovisa fungerande funktioner, kvarvarande begränsningar och tydliga nästa steg. Visa vid behov en fungerande demonstration hellre än att hävda att allt är färdigt.
+
+ACCEPTANSKRITERIER
+- Jag kan skapa en PC med ett 3D-hölje, placera två visuellt korrekta HDMI-portar och flera USB-portar med rätt relativa proportioner och tydlig fysisk placering.
+- Jag kan skapa en hubb och koppla den till en bestämd port på PC:n.
+- Jag kan koppla en kamera som enkel namnetikett till en bestämd port på hubben, utan en extra ritad kamerabox.
+- Jag kan växla mellan HELT TRÄD med pan/zoom och NIVÅVIS bläddring utan expandera/kollapsa.
+- Jag kan hoppa direkt till PC eller hubb från vänsterlistan.
+- Jag kan visa en nod i 3D, välja bak-/fram-/toppvy och se en mjuk animation mellan dem. Jag kan välja vilken vy som visas som standard.
+- Jag kan spara projektet, stänga appen, öppna det igen och få tillbaka korrekt modell, portar, kopplingar och vyinställningar.
+- Allt körs som en native Rust-baserad Windows-app utan Tauri/Electron/WebView.
+
+VIKTIGT FÖR AI-KODAREN
+Ovanstående beskriver användarens överenskomna produktkrav. Om ett tekniskt val är osäkert, välj ett praktiskt genomförbart native Rust-alternativ och motivera det kort. Undvik att ersätta krav med egna antaganden. Fråga bara när ett verkligt blockerande produktbeslut behövs; annars implementera stegvis och redovisa vad som fungerar. Avstå från stora 'allt på en gång'-påståenden: bygg körbara delar och verifiera dem.

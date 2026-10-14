@@ -1,0 +1,37 @@
+name: Windows build and tests
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      RUSTFLAGS: -C target-feature=+crt-static
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - name: Verify native Windows persistence
+        shell: pwsh
+        run: |
+          $report = Join-Path $env:RUNNER_TEMP 'cable-self-test.txt'
+          $process = Start-Process -FilePath 'target/release/CableManagement.exe' -ArgumentList @('--self-test', ('"' + $report + '"')) -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw 'Windows self-test failed' }
+          $result = Get-Content $report -Raw
+          if (-not $result.StartsWith('PASS:')) { throw $result }
+          Write-Output $result
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CableManagement-windows-x64
+          path: target/release/CableManagement.exe
+          if-no-files-found: error
