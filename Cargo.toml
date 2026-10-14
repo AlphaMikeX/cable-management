@@ -1,0 +1,30 @@
+[package]
+name = "cable-management"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Native offline physical cable and port documentation"
+license = "MIT"
+
+[features]
+default = ["gui"]
+gui = ["dep:eframe"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+eframe = { version = "0.33", optional = true, default-features = false, features = ["default_fonts", "glow", "x11"] }
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false }
+
+[[bin]]
+name = "CableManagement"
+path = "src/main.rs"
+required-features = ["gui"]
+
+[profile.release]
+opt-level = 2
+lto = "thin"
+strip = true
+codegen-units = 1

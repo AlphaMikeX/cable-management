@@ -1,0 +1,8 @@
+/target/
+/work/
+/.superpowers/
+*.exe
+*.dll
+*.pdb
+*.tmp
+*.bak
