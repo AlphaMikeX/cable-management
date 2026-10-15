@@ -758,7 +758,7 @@ impl CableApp {
             ui.checkbox(&mut self.view.labels, "Labels");
         });
         ui.label(RichText::new(
-            "Drag ports from the palette · double-click to name equipment or open its device · right-click for actions"
+            "Drag device to change sides · drag ports from the palette · double-click a port · right-click for actions"
         ).size(11.).color(MUTED));
         ui.add_space(5.);
         let previous_hover = self.hovered_node;
@@ -1072,7 +1072,7 @@ impl CableApp {
                     ui.label("5. Right-click a port to rotate, connect, disconnect or delete it. Connect to an existing device and choose a free port; drag a device from the list onto a port to preselect it.");
                     ui.label("6. Right-click a device name to rename or delete it. Right-click the canvas title to add a box or wedge.");
                     ui.separator();
-                    ui.label("Change sides with the face buttons. Scroll to zoom; middle-drag to pan. Hover a mapped port or label to highlight its device in the list.");
+                    ui.label("Change sides with the face buttons or drag an empty area of the device. Each swipe turns to one fixed side; there is no free rotation. Scroll to zoom; middle-drag to pan. Hover a mapped port or label to highlight its device in the list.");
                     ui.label("Ctrl+S save · Ctrl+Shift+S save as · Ctrl+O open\nCtrl+N new · Ctrl+Z undo · Ctrl+Y redo");
                     ui.separator();
                     ui.label("Connectors keep their physical size when you resize the enclosure. Choose Adapter when connector families differ. Supplementary connections do not change the device hierarchy.");

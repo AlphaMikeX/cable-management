@@ -15,6 +15,8 @@ Run `CableManagement.exe`. No adjacent runtime files or Rust installation are ne
 7. Double-click a port connected to a mapped device to open that device immediately. Hover a linked port or its label to highlight the peer in the left list. Navigation works from either end of a cable.
 8. Save as `.cable.json`. Reopening restores models, ports, connections, rotations and label positions. **Ctrl+Z** restores a deleted port and its connection or reverses an entire drag gesture.
 
+Drag an empty area of the device left, right, up or down to turn it to the adjacent fixed side. A swipe of at least 35 screen pixels triggers one turn per mouse press; long or diagonal drags cannot leave the device at a free angle. Release and drag again for another turn. This works in View and Edit; ports, labels and resize handles retain their editing gestures. Dragging the surrounding canvas does not turn the device.
+
 The right panel contains only the port palette. There is no properties inspector, bottom port list or tree view. Right-click a device in the left list to rename or delete it. Right-click the canvas title to add a box or wedge building block. Each building block has resize handles in Edit mode.
 
 ## Controls
@@ -30,7 +32,7 @@ The right panel contains only the port palette. There is no properties inspector
 | Drag a device from the left list onto a port | Connect to that device |
 | Middle-button drag | Pan |
 | Wheel | Zoom |
-| Named side buttons | Animated side changes; no manual mouse orbit |
+| Drag an empty device surface / named side buttons | Animated turns to fixed sides; no free rotation |
 | Reset view | Restore the device's saved default side and fit |
 | Ctrl+S / Ctrl+Shift+S | Save / Save as |
 | Ctrl+O / Ctrl+N | Open / New |

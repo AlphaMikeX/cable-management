@@ -26,6 +26,13 @@ struct LabelDrag {
     scale: f32,
 }
 
+#[derive(Clone, Copy)]
+struct SideSwipe {
+    origin: Pos2,
+    face: Face,
+    changed: bool,
+}
+
 pub struct ViewState {
     pub camera: Camera,
     pub target: Camera,
@@ -36,6 +43,7 @@ pub struct ViewState {
     drag_port: Option<Id>,
     resize: Option<ResizeDrag>,
     label_drag: Option<LabelDrag>,
+    swipe: Option<SideSwipe>,
     node: Option<Id>,
     context_port: Option<Id>,
 }
@@ -51,6 +59,7 @@ impl Default for ViewState {
             drag_port: None,
             resize: None,
             label_drag: None,
+            swipe: None,
             node: None,
             context_port: None,
         }
@@ -68,6 +77,7 @@ impl ViewState {
             self.drag_port = None;
             self.resize = None;
             self.label_drag = None;
+            self.swipe = None;
             self.context_port = None;
         }
         let (min, max) = node_bounds(node);
@@ -80,6 +90,7 @@ impl ViewState {
         self.drag_port = None;
         self.resize = None;
         self.label_drag = None;
+        self.swipe = None;
     }
     pub fn set_face(&mut self, face: Face) {
         self.cancel_gestures();
@@ -224,6 +235,23 @@ fn drop_preview(node: &Node, kind: PortKind, hit: SurfaceHit, camera: &Camera) -
     };
     port.clamp_to_part(part);
     (port.fits_on(part) && port_visible(node, &port, camera)).then_some(port)
+}
+
+/// Pick an adjacent named face from screen direction; never derive a free angle.
+fn swiped_face(face: Face, delta: Vec2) -> Option<Face> {
+    if !delta.is_finite() || delta.x.abs().max(delta.y.abs()) < 35. {
+        return None;
+    }
+    let camera = Camera::for_face(face);
+    let direction = if delta.x.abs() >= delta.y.abs() {
+        mul(camera.right(), -delta.x.signum())
+    } else {
+        mul(camera.up(), delta.y.signum())
+    };
+    Face::ALL.into_iter().max_by(|a, b| {
+        dot(Camera::for_face(*a).direction(), direction)
+            .total_cmp(&dot(Camera::for_face(*b).direction(), direction))
+    })
 }
 
 fn resize_cursor(handle: [i8; 2]) -> egui::CursorIcon {
@@ -456,6 +484,25 @@ pub fn draw(
     if let Some((_, h)) = resize_hit.filter(|_| hovered.is_none()) {
         ui.ctx().set_cursor_icon(resize_cursor(h));
     }
+    // Remember an eligible press before egui's drag threshold. A quick swipe
+    // can deliver its movement and release together in the following frame.
+    if response.is_pointer_button_down_on()
+        && ui.input(|i| i.pointer.button_pressed(egui::PointerButton::Primary))
+        && resize_hit.is_none()
+        && let Some(origin) = ui
+            .input(|i| i.pointer.press_origin())
+            .filter(|p| rect.contains(*p))
+        && pick_socket(&sockets, origin, None, 12.).is_none()
+    {
+        let at = (origin - center) / scale;
+        if surface_at(node, &state.camera, [at.x, at.y]).is_some() {
+            state.swipe = Some(SideSwipe {
+                origin,
+                face: state.face,
+                changed: false,
+            });
+        }
+    }
     if response.clicked()
         && let Some(socket) = hovered
     {
@@ -521,15 +568,21 @@ pub fn draw(
             }
         }
     }
-    if response.drag_started_by(egui::PointerButton::Primary) && editing && settled {
+    if response.drag_started_by(egui::PointerButton::Primary) {
         // egui reports drag-start after threshold: use the original press point.
         let press = ui.input(|i| i.pointer.press_origin());
         let hit = press.and_then(|p| pick_socket(&sockets, p, selected, 12.));
-        if let Some(socket) = hit {
+        if editing
+            && settled
+            && let Some(socket) = hit
+        {
             state.drag_port = Some(socket.id);
             event.selected = Some(socket.id);
             event.drag_started = true;
-        } else if let (Some((part, handle)), Some(origin)) = (resize_hit, press) {
+        } else if editing
+            && settled
+            && let (Some((part, handle)), Some(origin)) = (resize_hit, press)
+        {
             state.resize = Some(ResizeDrag {
                 part: part.clone(),
                 handle,
@@ -555,7 +608,11 @@ pub fn draw(
     if response.dragged_by(egui::PointerButton::Middle) {
         state.pan += ui.input(|i| i.pointer.delta());
     }
-    if response.hovered() && state.resize.is_none() && state.label_drag.is_none() {
+    if response.hovered()
+        && state.resize.is_none()
+        && state.label_drag.is_none()
+        && state.swipe.is_none()
+    {
         let wheel = ui.input(|i| i.smooth_scroll_delta.y);
         if wheel != 0. {
             state.zoom = (state.zoom * (wheel * 0.0025).exp()).clamp(0.2, 18.);
@@ -738,6 +795,30 @@ pub fn draw(
             egui::CursorIcon::PointingHand
         });
     }
+    if let Some(mut swipe) = state.swipe {
+        if !swipe.changed
+            && let Some(next) =
+                pointer.and_then(|point| swiped_face(swipe.face, point - swipe.origin))
+        {
+            state.set_face(next);
+            swipe.changed = true;
+            state.swipe = Some(swipe);
+            ui.ctx().request_repaint();
+        }
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+        if !ui.input(|i| i.pointer.primary_down()) {
+            state.swipe = None;
+        }
+    } else if hovered.is_none()
+        && resize_hit.is_none()
+        && response.hovered()
+        && let Some(point) = pointer
+    {
+        let at = (point - center) / scale;
+        if surface_at(node, &state.camera, [at.x, at.y]).is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+        }
+    }
     // Millimetre scale and orientation triad.
     let mm = if scale > 4. {
         10.
@@ -839,10 +920,224 @@ mod tests {
         assert_eq!(e.moved.map(|p| p.0), Some(b));
         assert!(e.label_moved.is_none());
     }
+    #[test]
+    fn device_swipes_choose_adjacent_fixed_views_in_view_and_edit_modes() {
+        let directions = [
+            Vec2::new(-80., 0.),
+            Vec2::new(80., 0.),
+            Vec2::new(0., -80.),
+            Vec2::new(0., 80.),
+        ];
+        for editing in [false, true] {
+            for (face, expected) in [
+                (
+                    Face::Front,
+                    [Face::Right, Face::Left, Face::Bottom, Face::Top],
+                ),
+                (
+                    Face::Back,
+                    [Face::Left, Face::Right, Face::Bottom, Face::Top],
+                ),
+                (
+                    Face::Left,
+                    [Face::Front, Face::Back, Face::Bottom, Face::Top],
+                ),
+                (
+                    Face::Right,
+                    [Face::Back, Face::Front, Face::Bottom, Face::Top],
+                ),
+                (
+                    Face::Top,
+                    [Face::Right, Face::Left, Face::Front, Face::Back],
+                ),
+                (
+                    Face::Bottom,
+                    [Face::Right, Face::Left, Face::Back, Face::Front],
+                ),
+            ] {
+                for (delta, expected) in directions.into_iter().zip(expected) {
+                    let mut p = Project::default();
+                    let node = p.add_node("Device", [200.; 3]);
+                    p.node_mut(node).unwrap().default_view = face;
+                    let ctx = egui::Context::default();
+                    let mut state = ViewState::default();
+                    let start = Pos2::new(400., 300.);
+                    rendered_mode(
+                        &ctx,
+                        &p,
+                        &mut state,
+                        editing,
+                        0.,
+                        vec![egui::Event::PointerMoved(start)],
+                    );
+                    rendered_mode(&ctx, &p, &mut state, editing, 0.1, vec![press(start, true)]);
+                    let (event, _) = rendered_mode(
+                        &ctx,
+                        &p,
+                        &mut state,
+                        editing,
+                        0.2,
+                        vec![egui::Event::PointerMoved(start + delta)],
+                    );
+                    assert_eq!(
+                        state.face, expected,
+                        "{face:?} + {delta:?}, editing={editing}"
+                    );
+                    let target = Camera::for_face(expected);
+                    assert_eq!(
+                        (state.target.yaw, state.target.pitch),
+                        (target.yaw, target.pitch)
+                    );
+                    assert!(!event.drag_started);
+                    assert!(event.moved.is_none());
+                    assert!(event.resized.is_none());
+                    assert!(event.label_moved.is_none());
+                }
+            }
+        }
+    }
+    #[test]
+    fn long_diagonal_swipe_takes_one_step_and_finishes_at_the_exact_fixed_angle() {
+        let mut p = Project::default();
+        p.add_node("Device", [200.; 3]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let start = Pos2::new(400., 300.);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        rendered(&ctx, &p, &mut state, 0.1, vec![press(start, true)]);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.2,
+            vec![egui::Event::PointerMoved(start + Vec2::new(-80., 50.))],
+        );
+        assert_eq!(state.face, Face::Left);
+        // Keep holding, extend the drag, then reverse: no further camera steps.
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.3,
+            vec![egui::Event::PointerMoved(start + Vec2::new(-350., 150.))],
+        );
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.4,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        assert_eq!(state.face, Face::Left);
+        rendered(&ctx, &p, &mut state, 0.5, vec![press(start, false)]);
+        for i in 1..=120 {
+            rendered(&ctx, &p, &mut state, 0.5 + f64::from(i) / 60., vec![]);
+        }
+        let fixed = Camera::for_face(Face::Left);
+        assert_eq!(
+            (state.camera.yaw, state.camera.pitch),
+            (fixed.yaw, fixed.pitch)
+        );
+        // A new physical stroke can advance another fixed step.
+        rendered(&ctx, &p, &mut state, 3., vec![press(start, true)]);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            3.1,
+            vec![egui::Event::PointerMoved(start + Vec2::new(-80., 0.))],
+        );
+        assert_eq!(state.face, Face::Front);
+    }
+    #[test]
+    fn fast_swipe_uses_final_release_position_when_move_and_release_share_a_frame() {
+        let mut p = Project::default();
+        p.add_node("Device", [200.; 3]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let start = Pos2::new(400., 300.);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        rendered(&ctx, &p, &mut state, 0.1, vec![press(start, true)]);
+        let end = start + Vec2::new(-80., 0.);
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.12,
+            vec![egui::Event::PointerMoved(end), press(end, false)],
+        );
+        assert_eq!(state.face, Face::Left);
+        assert!(!e.drag_started);
+        assert!(state.swipe.is_none());
+    }
+    #[test]
+    fn small_body_drags_and_drags_starting_off_the_device_do_not_switch_sides() {
+        let mut p = Project::default();
+        p.add_node("Device", [200.; 3]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let start = Pos2::new(400., 300.);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        rendered(&ctx, &p, &mut state, 0.1, vec![press(start, true)]);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.2,
+            vec![egui::Event::PointerMoved(start + Vec2::new(20., -8.))],
+        );
+        rendered(&ctx, &p, &mut state, 0.3, vec![press(start, false)]);
+        assert_eq!(state.face, Face::Back);
+        let outside = Pos2::new(60., 60.);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.4,
+            vec![egui::Event::PointerMoved(outside)],
+        );
+        rendered(&ctx, &p, &mut state, 0.5, vec![press(outside, true)]);
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.6,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        assert_eq!(state.face, Face::Back);
+    }
     fn rendered(
         ctx: &egui::Context,
         p: &Project,
         state: &mut ViewState,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (SceneEvent, egui::FullOutput) {
+        rendered_mode(ctx, p, state, true, time, events)
+    }
+    fn rendered_mode(
+        ctx: &egui::Context,
+        p: &Project,
+        state: &mut ViewState,
+        editing: bool,
         time: f64,
         events: Vec<egui::Event>,
     ) -> (SceneEvent, egui::FullOutput) {
@@ -856,7 +1151,7 @@ mod tests {
             },
             |ctx| {
                 egui::CentralPanel::default().show(ctx, |ui| {
-                    event = draw(ui, p, &p.nodes[0], None, true, state);
+                    event = draw(ui, p, &p.nodes[0], None, editing, state);
                 });
             },
         );
@@ -1273,7 +1568,7 @@ mod tests {
         assert_eq!(result.edit_label, Some(port));
     }
     #[test]
-    fn mouse_drags_cannot_change_the_named_side_orientation() {
+    fn background_drags_cannot_change_the_named_side_orientation() {
         for button in [egui::PointerButton::Primary, egui::PointerButton::Secondary] {
             let p = Project::demo();
             let n = &p.nodes[0];

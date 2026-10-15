@@ -1,5 +1,11 @@
 # Changes
 
+## 0.3.1 — 2026-10-15
+
+- Drag an empty enclosure surface to turn to an adjacent fixed side. Horizontal and vertical swipes work from all six views, in View and Edit. Each mouse press triggers at most one animated turn after a 35-pixel threshold. The camera always finishes at a named side; there is no free rotation.
+- Port movement, label dragging, resize handles and canvas panning keep their existing gestures. Background drags do not turn the model.
+
+
 ## 0.3.0 — 2026-10-15
 
 - Canvas-only editing: removed properties inspector, bottom port list and tree view. Right panel contains only the full-height draggable port library. Entire interface is English.
