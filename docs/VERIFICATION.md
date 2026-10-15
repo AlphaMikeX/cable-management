@@ -1,35 +1,38 @@
-# v0.3.1 release verification — 2026-10-15
+# v0.4.0 release verification — 2026-10-16
 
-Code commit: `225d5a5` on `codex/cable-management-v0-1`.
+Code commit: `3fa1461` on `codex/cable-management-v0-1`.
 
-## Checks
+## Automated checks
 
-- Formatting and Clippy with warnings denied: passed.
-- `cargo test --locked`: **67 tests passed**, including 32 native UI/rendering/gesture tests.
+- `cargo fmt -- --check`: passed.
+- `cargo clippy --all-targets --locked -- -D warnings`: passed.
+- `cargo test --locked`: **85 tests passed**, including 48 native UI/palette/rendering/editor tests and 37 integration tests.
 - Windows x64 GNU release cross-compilation: passed.
-- Native persistence/canvas diagnostic: passed.
-- [Windows CI](https://github.com/AlphaMikeX/cable-management/actions/runs/38793603329): passed: formatting, lint, all 67 tests, MSVC release build, native Windows persistence/canvas diagnostic and artifact upload.
+- Native executable self-test: passed, including pre-rotated placement, persistence, rotation, resizing, labels and safe replacement.
+- [Windows CI](https://github.com/AlphaMikeX/cable-management/actions/runs/38819331883): passed: formatting, lint, all 85 tests, MSVC release build, native Windows persistence diagnostic and artifact upload.
 
-The new pointer regressions exercise all four swipe directions from all six fixed views, in both View and Edit. They verify one turn per mouse press, dominant-direction diagonal swipes, long held drags and reversals, exact final yaw/pitch, another turn after releasing and pressing again, small-movement rejection and no rotation for drags starting off the device. A fast swipe whose movement and release share a frame also turns correctly.
+Palette tests exercise the actual rotation button above the icons, four-click cycling, captured drag angle and all 20 connector icon bounds. An asymmetric USB-B icon verifies clockwise direction. A UI integration test clicks the library button and drops a vertical USB-A onto a 6 mm wide face, where the unrotated port would not fit. Existing ports, dirty state and undo remain unchanged when only the library rotates. Preview and final placement use the same angle; invalid rotated fits preserve the complete project and identity counter. Angles persist through JSON reload.
 
-The existing pointer suite still verifies that ports, labels and resize handles retain their gestures and that background primary/secondary dragging cannot change orientation. Swipes emit no project edit/history event. Every destination uses the same named-face camera target as the side buttons; pointer motion never assigns a free camera angle.
+Connection tests cover one common editor, equipment and mapped-device modes, atomic source replacement, retargeting and undo, same-peer receiving-side option edits preserving cable identity/direction/label, unchanged Save preserving all IDs, endpoint rename identity, current-peer inclusion despite port occupancy, occupied-target rejection, cancelling, incomplete draft Save-and-continue rejection, and preservation through error dismissal. Existing mapped-port double-click navigation works in either direction.
 
-Independent review found that a fast release could be lost when swipe state began only after egui's drag threshold. A failing-then-passing regression now captures the eligible primary press before that threshold. The reviewer confirmed the fast-release fix and label/socket/resize ownership, and approved the final change. Egui still does not recognize a complete press/move/release batched into a single frame as a drag; this was reviewed as nonblocking.
+Independent review found a dropdown keyboard issue: Enter could save and Escape could discard the enclosing draft while a device/port popup was open. The regression failed first, then passed with popup-aware shortcuts and equipment-only Enter submission. The reviewer reproduced the fix independently and approved the final changes. No other actionable review findings remained.
 
-## Native interaction check
+## Native interaction checks
 
-Ran the native OpenGL application under X11. A leftward enclosure swipe changed Back to Left. A downward swipe changed Left to Top; holding the mouse down through the animation and extending the stroke retained Top, with no extra steps or free angle. The named side indicator matched the completed view. Labels and physical geometry remained intact. Interactive desktop checks used Linux; Windows CI separately executes the same headless gesture tests and native Windows persistence diagnostic.
+The application ran under X11/OpenGL at 1600×1000. The new button rotated library icons clockwise while the project stayed Saved. Dragging USB-A onto the chassis saved its angle as 270° in the existing surface-local counterclockwise convention; older ports retained their 0° angles. The context menu displayed exactly one **Connection…** entry. Its equipment-name mode saved `Desk mouse` without adding a node, and the same dialog switched to mapped-device and free-port selection.
 
-## Delivery
+Manual graphical checks used Linux. Windows CI separately runs the full headless egui gesture/editor tests and a native Windows persistence diagnostic. Project format is unchanged; existing user data remains compatible.
 
-`CableManagement.exe`, Windows x86_64 GNU release, **4,876,288 bytes**. Imports contain only Windows system DLLs; no adjacent runtime files are required.
+## Delivered executable
+
+`CableManagement.exe`, Windows x86_64 GNU release, **4,886,528 bytes**. Imports contain only Windows system DLLs, so no adjacent runtime files are required.
 
 SHA-256:
 
 ```text
-f100966c003a6494d8856b5072e944003702e8855ab9e61bf4ef20eefde303d7
+0e4bb9192a46e64c0b860fd2726eca9a92ff69df3b2b3635614083f1dbbfeaa6
 ```
 
-Replaced the existing executable in `AI Output/Cable Management` on Google Drive. A fresh download compared byte for byte equal to the build. The folder contains only `CableManagement.exe`. Source, tests and documentation are stored in GitHub.
+Replaced the same Google Drive file in `AI Output/Cable Management`. A fresh download compared byte for byte equal to the compiled build. The folder contains only `CableManagement.exe`; source, tests and documentation remain in GitHub.
 
-The delivered GNU binary and the MSVC binary built in Windows CI use the same source but are different binaries. Project format and stored user data are unchanged in this patch release.
+The delivered GNU executable and the MSVC release built in Windows CI use the same source but are different binaries.
