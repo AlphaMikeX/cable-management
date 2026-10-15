@@ -84,6 +84,16 @@ pub struct Port {
     pub metadata: String,
 }
 impl Port {
+    pub fn fits_on(&self, part: &Part) -> bool {
+        if !self.angle.is_finite() || self.uv.iter().any(|v| !v.is_finite()) {
+            return false;
+        }
+        let size = part.surface_size(self.face, self.uv);
+        let ext = self.half_extents();
+        self.uv[0].abs() * size[0] + ext[0] <= size[0] * 0.5 + 0.01
+            && (self.uv[1] + 0.5) * size[1] >= ext[1] - 0.01
+            && (0.5 - self.uv[1]) * size[1] >= self.top_clearance(part) - 0.01
+    }
     fn top_clearance(&self, part: &Part) -> f32 {
         if part.shape == Primitive::Wedge && matches!(self.face, Face::Left | Face::Right) {
             let slope =
@@ -177,6 +187,70 @@ impl Default for Project {
     }
 }
 impl Project {
+    pub fn place_port(
+        &mut self,
+        node: Id,
+        kind: PortKind,
+        part: Id,
+        face: Face,
+        uv: [f32; 2],
+    ) -> Result<Id, String> {
+        if uv.iter().any(|v| !v.is_finite() || v.abs() > 0.5) {
+            return Err("Släpp porten på en synlig yta på enheten.".into());
+        }
+        let n = self.node(node).ok_or("Enheten finns inte.")?;
+        let body = n
+            .parts
+            .iter()
+            .find(|p| p.id == part)
+            .ok_or("Byggstenen finns inte.")?
+            .clone();
+        let mut index = 1;
+        let name = loop {
+            let name = format!("{} {}", kind.name(), index);
+            if !n.ports.iter().any(|p| p.name == name) {
+                break name;
+            }
+            index += 1;
+        };
+        let mut candidate = self.clone();
+        let id = candidate.add_port(node, kind, &name)?;
+        let port = candidate.port_mut(PortRef { node, port: id }).unwrap();
+        port.part = part;
+        port.face = face;
+        port.uv = uv;
+        port.clamp_to_part(&body);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(id)
+    }
+    pub fn label_port(&mut self, port: PortRef, text: &str) -> Result<(), String> {
+        if self.port(port).is_none() {
+            return Err("Porten finns inte längre.".into());
+        }
+        let text = text.trim();
+        let mut candidate = self.clone();
+        if let Some(connection) = candidate.connection_at(port).cloned() {
+            let Target::Endpoint(id) = connection.to else {
+                return Err("Porten är kopplad till en mappad enhet. Koppla loss kabeln först om du vill ersätta den med en textetikett.".into());
+            };
+            if text.is_empty() {
+                candidate.disconnect(port);
+            } else {
+                candidate
+                    .endpoints
+                    .iter_mut()
+                    .find(|e| e.id == id)
+                    .unwrap()
+                    .name = text.into();
+            }
+        } else if !text.is_empty() {
+            candidate.connect_endpoint(port, text)?;
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
     pub fn allocate(&mut self) -> Id {
         let id = self.next_id;
         self.next_id += 1;
@@ -475,12 +549,7 @@ impl Project {
                 if !p.angle.is_finite() || p.uv.iter().any(|v| !v.is_finite()) {
                     return Err("Portens position eller rotation är ogiltig.".into());
                 }
-                let size = part.surface_size(p.face, p.uv);
-                let ext = p.half_extents();
-                if p.uv[0].abs() * size[0] + ext[0] > size[0] * 0.5 + 0.01
-                    || (p.uv[1] + 0.5) * size[1] < ext[1] - 0.01
-                    || (0.5 - p.uv[1]) * size[1] < p.top_clearance(part) - 0.01
-                {
+                if !p.fits_on(part) {
                     return Err(format!(
                         "Porten '{}' ryms inte på ytan. Öka höljet eller flytta porten.",
                         p.name

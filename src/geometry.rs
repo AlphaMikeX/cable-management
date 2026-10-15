@@ -1,6 +1,41 @@
 use crate::model::{Face, Node, Part, Port, Primitive};
 
 pub type Vec3 = [f32; 3];
+#[derive(Clone, Copy, Debug)]
+pub struct SurfaceHit {
+    pub part: crate::model::Id,
+    pub face: Face,
+    pub uv: [f32; 2],
+}
+/// Resolve an orthographic pointer to the frontmost opaque physical surface.
+pub fn surface_at(node: &Node, camera: &Camera, screen: [f32; 2]) -> Option<SurfaceHit> {
+    let mut closest = None;
+    let mut depth = f32::NEG_INFINITY;
+    for part in &node.parts {
+        for face in Face::ALL {
+            let frame = face_frame(part, face, [0.; 2]);
+            if dot(frame.normal, camera.direction()) < 0.05 {
+                continue;
+            }
+            let Some(uv) = face_uv_at(part, face, camera, screen) else {
+                continue;
+            };
+            if uv.iter().any(|v| !v.is_finite() || v.abs() > 0.5) {
+                continue;
+            }
+            let hit_depth = camera.project(face_frame(part, face, uv).center).1;
+            if hit_depth > depth {
+                depth = hit_depth;
+                closest = Some(SurfaceHit {
+                    part: part.id,
+                    face,
+                    uv,
+                });
+            }
+        }
+    }
+    closest
+}
 pub fn add(a: Vec3, b: Vec3) -> Vec3 {
     [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
 }

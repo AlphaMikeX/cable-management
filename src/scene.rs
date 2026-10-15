@@ -1,3 +1,4 @@
+use cable_management::ports::PortKind;
 use cable_management::{geometry::*, model::*};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
 
@@ -14,6 +15,7 @@ pub struct ViewState {
     pub pan: Vec2,
     drag_port: Option<Id>,
     node: Option<Id>,
+    context_port: Option<Id>,
 }
 impl Default for ViewState {
     fn default() -> Self {
@@ -26,6 +28,7 @@ impl Default for ViewState {
             pan: Vec2::ZERO,
             drag_port: None,
             node: None,
+            context_port: None,
         }
     }
 }
@@ -39,6 +42,7 @@ impl ViewState {
             self.zoom = 1.;
             self.pan = Vec2::ZERO;
             self.drag_port = None;
+            self.context_port = None;
         }
         let (min, max) = node_bounds(node);
         self.camera.center = mul(add(min, max), 0.5);
@@ -60,6 +64,15 @@ pub struct SceneEvent {
     pub selected: Option<Id>,
     pub moved: Option<(Id, [f32; 2])>,
     pub drag_started: bool,
+    pub dropped: Option<PortDrop>,
+    pub delete: Option<Id>,
+    pub edit_label: Option<Id>,
+    pub drop_rejected: bool,
+}
+#[derive(Clone, Copy, Debug)]
+pub struct PortDrop {
+    pub kind: PortKind,
+    pub hit: SurfaceHit,
 }
 
 struct Polygon {
@@ -107,14 +120,54 @@ fn pick_socket(
         .iter()
         .filter(|s| inside(point, &s.points) || s.center.distance(point) < radius)
         .min_by(|a, b| {
-            (Some(a.id) != selected)
-                .cmp(&(Some(b.id) != selected))
+            // A real socket hit always wins over a neighbour's enlarged click
+            // tolerance. Selected preference only disambiguates real overlaps.
+            let a_inside = inside(point, &a.points);
+            let b_inside = inside(point, &b.points);
+            b_inside
+                .cmp(&a_inside)
+                .then_with(|| {
+                    if a_inside && b_inside {
+                        (Some(a.id) != selected).cmp(&(Some(b.id) != selected))
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| {
                     a.center
                         .distance(point)
                         .total_cmp(&b.center.distance(point))
                 })
         })
+}
+
+fn port_menu(response: &egui::Response, port: Id, event: &mut SceneEvent) {
+    response.context_menu(|ui| {
+        if ui.button("Ange ansluten utrustning…").clicked() {
+            event.edit_label = Some(port);
+            ui.close();
+        }
+        if ui.button("Delete · Ta bort port").clicked() {
+            event.delete = Some(port);
+            ui.close();
+        }
+    });
+}
+
+fn drop_preview(node: &Node, kind: PortKind, hit: SurfaceHit, camera: &Camera) -> Option<Port> {
+    let part = node.parts.iter().find(|p| p.id == hit.part)?;
+    let mut port = Port {
+        id: 0,
+        name: kind.name().into(),
+        kind,
+        part: hit.part,
+        face: hit.face,
+        uv: hit.uv,
+        angle: 0.,
+        metadata: String::new(),
+    };
+    port.clamp_to_part(part);
+    (port.fits_on(part) && port_visible(node, &port, camera)).then_some(port)
 }
 
 pub fn draw(
@@ -255,12 +308,64 @@ pub fn draw(
         .or_else(|| ui.input(|i| i.pointer.interact_pos()));
     let hovered = pointer
         .filter(|p| rect.contains(*p))
-        .and_then(|p| pick_socket(&sockets, p, selected, 9.));
+        .and_then(|p| pick_socket(&sockets, p, None, 9.));
     let mut event = SceneEvent::default();
     if response.clicked()
         && let Some(socket) = hovered
     {
         event.selected = Some(socket.id);
+    }
+    if response.double_clicked_by(egui::PointerButton::Primary)
+        && let Some(socket) = hovered
+    {
+        event.edit_label = Some(socket.id);
+    }
+    if response.secondary_clicked() {
+        state.context_port = hovered.map(|s| s.id);
+    }
+    if let Some(port) = state
+        .context_port
+        .filter(|id| node.ports.iter().any(|p| p.id == *id))
+    {
+        port_menu(&response, port, &mut event);
+    }
+    if editing && let Some(kind) = response.dnd_hover_payload::<PortKind>() {
+        let candidate = pointer.and_then(|point| {
+            let at = (point - center) / scale;
+            let hit = surface_at(node, &state.camera, [at.x, at.y])?;
+            Some((hit, drop_preview(node, *kind, hit, &state.camera)?))
+        });
+        if let Some((hit, preview)) = &candidate {
+            let part = node.parts.iter().find(|p| p.id == hit.part).unwrap();
+            let frame = face_frame(part, hit.face, preview.uv);
+            let points = socket_points(preview, &frame)
+                .into_iter()
+                .map(|p| to_screen(p).0)
+                .collect();
+            painter.add(Shape::convex_polygon(
+                points,
+                Color32::from_rgba_unmultiplied(99, 221, 180, 50),
+                Stroke::new(2_f32, ACCENT),
+            ));
+            painter.add(Shape::closed_line(
+                face_vertices(part, hit.face)
+                    .into_iter()
+                    .map(|p| to_screen(p).0)
+                    .collect(),
+                Stroke::new(1.5_f32, ACCENT),
+            ));
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Crosshair);
+        } else {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
+        }
+        if response.dnd_release_payload::<PortKind>().is_some() {
+            if let Some((mut hit, preview)) = candidate {
+                hit.uv = preview.uv;
+                event.dropped = Some(PortDrop { kind: *kind, hit });
+            } else {
+                event.drop_rejected = true;
+            }
+        }
     }
     if response.drag_started_by(egui::PointerButton::Primary) && editing {
         // egui reports drag-start after threshold: use the original press point.
@@ -288,13 +393,6 @@ pub fn draw(
         if !ui.input(|i| i.pointer.primary_down()) {
             state.drag_port = None;
         }
-    } else if response.dragged_by(egui::PointerButton::Primary)
-        || response.dragged_by(egui::PointerButton::Secondary)
-    {
-        let delta = ui.input(|i| i.pointer.delta());
-        state.camera.yaw -= delta.x * 0.008;
-        state.camera.pitch = (state.camera.pitch + delta.y * 0.008).clamp(-1.56, 1.56);
-        state.target = state.camera;
     }
     if response.dragged_by(egui::PointerButton::Middle) {
         state.pan += ui.input(|i| i.pointer.delta());
@@ -343,6 +441,14 @@ pub fn draw(
         );
         painter.rect_filled(bg, 3., Color32::from_rgba_unmultiplied(15, 22, 29, 240));
         painter.galley(pos, galley, Color32::WHITE);
+        let label_response = ui.interact(bg, ui.id().with(("port-label", s.id)), Sense::click());
+        if label_response.clicked() {
+            event.selected = Some(s.id);
+        }
+        if label_response.double_clicked() {
+            event.edit_label = Some(s.id);
+        }
+        port_menu(&label_response, s.id, &mut event);
         if selected == Some(s.id) {
             painter.circle_stroke(s.center, 12., Stroke::new(1.5_f32, ORANGE));
         }
@@ -353,7 +459,7 @@ pub fn draw(
             ui.label(&socket.kind);
             ui.label(socket.connection.as_deref().unwrap_or("Ledig port"));
             if editing {
-                ui.small("Dra porten för att flytta den på ytan.");
+                ui.small("Dra för att flytta · dubbelklicka för text · högerklicka för Delete.");
             }
         });
         ui.ctx().set_cursor_icon(if editing {
@@ -415,6 +521,272 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drop_cannot_clamp_a_socket_behind_another_building_block() {
+        let mut p = Project::default();
+        let id = p.add_node("Enhet", [100.; 3]);
+        p.add_part(id, Primitive::Box).unwrap();
+        p.node_mut(id).unwrap().parts[1].size = [100.; 3];
+        p.node_mut(id).unwrap().parts[1].offset = [5., 0., -60.];
+        let node = p.node(id).unwrap();
+        let camera = Camera::for_face(Face::Back);
+        let hit = surface_at(node, &camera, [49., 0.]).unwrap();
+        assert_eq!(hit.part, node.parts[0].id);
+        assert!(drop_preview(node, PortKind::Xlr, hit, &camera).is_none());
+    }
+    #[test]
+    fn exact_socket_hit_beats_a_selected_neighbour_within_click_tolerance() {
+        let sockets: Vec<_> = [(1, 0_f32), (2, 5_f32)]
+            .into_iter()
+            .map(|(id, x)| Socket {
+                id,
+                center: Pos2::new(x, 0.),
+                points: vec![
+                    Pos2::new(x - 1.75, -1.75),
+                    Pos2::new(x + 1.75, -1.75),
+                    Pos2::new(x + 1.75, 1.75),
+                    Pos2::new(x - 1.75, 1.75),
+                ],
+                name: String::new(),
+                kind: String::new(),
+                connection: None,
+                depth: 0.,
+            })
+            .collect();
+        assert_eq!(
+            pick_socket(&sockets, Pos2::new(5., 0.), Some(1), 9.)
+                .unwrap()
+                .id,
+            2
+        );
+    }
+    #[test]
+    fn right_click_menu_emits_delete_for_the_clicked_socket() {
+        let mut p = Project::default();
+        let node = p.add_node("PC", [200., 300., 200.]);
+        let port = p.add_port(node, PortKind::UsbA, "USB 1").unwrap();
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let pos = Pos2::new(400., 300.);
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.2,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Secondary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.))),
+                time: Some(0.25),
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    draw(ui, &p, &p.nodes[0], None, true, &mut state);
+                });
+            },
+        );
+        let point = output
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.job.text == "Delete · Ta bort port" => {
+                    Some(t.pos + t.galley.size() / 2.)
+                }
+                _ => None,
+            })
+            .expect("Delete menu item must be visible");
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.3,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        let result = frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.4,
+            vec![egui::Event::PointerButton {
+                pos: point,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert_eq!(result.delete, Some(port));
+    }
+    fn frame(
+        ctx: &egui::Context,
+        p: &Project,
+        state: &mut ViewState,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> SceneEvent {
+        let mut result = SceneEvent::default();
+        let _ = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    result = draw(ui, p, &p.nodes[0], None, true, state);
+                });
+            },
+        );
+        result
+    }
+    #[test]
+    fn native_drag_payload_drops_on_the_visible_device_face() {
+        let mut p = Project::default();
+        p.add_node("PC", [200., 300., 200.]);
+        let mut state = ViewState::default();
+        let ctx = egui::Context::default();
+        let pos = Pos2::new(400., 300.);
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        egui::DragAndDrop::set_payload(&ctx, PortKind::UsbC);
+        let result = frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.2,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        let dropped = result.dropped.unwrap();
+        assert_eq!(dropped.kind, PortKind::UsbC);
+        assert_eq!(dropped.hit.face, Face::Back);
+    }
+    #[test]
+    fn double_clicking_a_socket_opens_its_equipment_text_editor() {
+        let mut p = Project::default();
+        let node = p.add_node("PC", [200., 300., 200.]);
+        let port = p.add_port(node, PortKind::UsbA, "USB 1").unwrap();
+        let mut state = ViewState::default();
+        let ctx = egui::Context::default();
+        let pos = Pos2::new(400., 300.);
+        frame(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(pos)],
+        );
+        let mut result = SceneEvent::default();
+        for (i, pressed) in [true, false, true, false].into_iter().enumerate() {
+            result = frame(
+                &ctx,
+                &p,
+                &mut state,
+                0.05 + i as f64 * 0.05,
+                vec![egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+        }
+        assert_eq!(result.edit_label, Some(port));
+    }
+    #[test]
+    fn mouse_drags_cannot_change_the_named_side_orientation() {
+        for button in [egui::PointerButton::Primary, egui::PointerButton::Secondary] {
+            let p = Project::demo();
+            let n = &p.nodes[0];
+            let mut state = ViewState::default();
+            state.select(n);
+            let expected = (state.camera.yaw, state.camera.pitch);
+            let ctx = egui::Context::default();
+            let mut render = |time, events| {
+                let _ = ctx.run(
+                    egui::RawInput {
+                        screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.))),
+                        time: Some(time),
+                        events,
+                        ..Default::default()
+                    },
+                    |ctx| {
+                        egui::CentralPanel::default().show(ctx, |ui| {
+                            draw(ui, &p, n, None, true, &mut state);
+                        });
+                    },
+                );
+            };
+            let start = Pos2::new(35., 50.);
+            render(0., vec![egui::Event::PointerMoved(start)]);
+            render(
+                0.1,
+                vec![egui::Event::PointerButton {
+                    pos: start,
+                    button,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+            );
+            render(0.2, vec![egui::Event::PointerMoved(Pos2::new(155., 140.))]);
+            assert_eq!((state.camera.yaw, state.camera.pitch), expected);
+        }
+    }
     #[test]
     fn selected_port_can_be_dragged_when_new_ports_overlap() {
         let sockets: Vec<_> = (1..=2)
