@@ -9,11 +9,13 @@ pub struct PortLabel {
 pub enum Action {
     Save,
     Cancel,
-    GoTo(PortRef),
 }
 impl PortLabel {
     pub fn has_changes(&self, project: &Project) -> bool {
-        match project.connection_at(self.port).map(|c| c.to) {
+        match project
+            .connection_at(self.port)
+            .map(|connection| connection.to)
+        {
             Some(Target::Endpoint(id)) => project
                 .endpoint(id)
                 .is_some_and(|e| e.name != self.text.trim()),
@@ -23,9 +25,12 @@ impl PortLabel {
     }
     pub fn new(project: &Project, port: PortRef) -> Option<Self> {
         project.port(port)?;
+        if project.connected_peer(port).is_some() {
+            return None;
+        }
         let text = project
             .connection_at(port)
-            .and_then(|c| match c.to {
+            .and_then(|connection| match connection.to {
                 Target::Endpoint(id) => project.endpoint(id).map(|e| e.name.clone()),
                 _ => None,
             })
@@ -41,50 +46,33 @@ impl PortLabel {
         let mut action = None;
         egui::Modal::new(egui::Id::new("port-label-editor")).show(ctx, |ui| {
             ui.set_min_width(370.);
-            ui.heading("Ansluten utrustning");
+            ui.heading("Connected equipment");
             ui.label(format!(
                 "{} · {} · {}",
                 port.name,
                 port.kind.name(),
                 port.face.name()
             ));
-            if let Some(c) = project.connection_at(self.port)
-                && let Target::Port(to) = c.to
-            {
-                let peer = if c.from == self.port { to } else { c.from };
-                ui.label(format!(
-                    "Den här porten är kopplad till {}.",
-                    project.target_label(c, self.port)
-                ));
-                ui.label("Enheten har egna portar som mappas separat.");
-                if ui.button("Gå till den enheten").clicked() {
-                    action = Some(Action::GoTo(peer));
+            ui.label("Enter an equipment name, such as gaming mouse or webcam.");
+            let response = ui.add_sized(
+                [370., 30.],
+                egui::TextEdit::singleline(&mut self.text).hint_text("e.g. gaming mouse"),
+            );
+            if self.focus {
+                response.request_focus();
+                self.focus = false;
+            }
+            ui.small("The name appears beside this port. Clear it to remove the equipment label.");
+            ui.horizontal(|ui| {
+                if ui.button("Save label").clicked()
+                    || ctx.input(|i| i.key_pressed(egui::Key::Enter))
+                {
+                    action = Some(Action::Save);
                 }
-                if ui.button("Stäng").clicked() {
+                if ui.button("Cancel").clicked() {
                     action = Some(Action::Cancel);
                 }
-            } else {
-                ui.label("Skriv ett namn, till exempel gamingmus eller webbkamera.");
-                let response = ui.add_sized(
-                    [370., 30.],
-                    egui::TextEdit::singleline(&mut self.text).hint_text("t.ex. gamingmus"),
-                );
-                if self.focus {
-                    response.request_focus();
-                    self.focus = false;
-                }
-                ui.small("Namnet visas vid porten. Ingen extra enhet behöver skapas.");
-                ui.horizontal(|ui| {
-                    if ui.button("Spara etikett").clicked()
-                        || ctx.input(|i| i.key_pressed(egui::Key::Enter))
-                    {
-                        action = Some(Action::Save);
-                    }
-                    if ui.button("Avbryt").clicked() {
-                        action = Some(Action::Cancel);
-                    }
-                });
-            }
+            });
             if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                 action = Some(Action::Cancel);
             }

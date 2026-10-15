@@ -1,91 +1,83 @@
 # Cable Management
 
-En native Rust-app för Windows 10/11 (64-bit) som dokumenterar exakt var fysisk utrustning och kablar sitter. Appen fungerar helt lokalt, utan konto eller internet.
+Native offline Rust application for Windows 10/11 x64. Map physical ports and their attached equipment without an account or internet connection.
 
-## Köra
+Run `CableManagement.exe`. No adjacent runtime files or Rust installation are needed. The graphics driver must support OpenGL.
 
-Starta `CableManagement.exe`. Inga filer behöver ligga bredvid programmet och ingen Rust-installation krävs. Grafikdrivrutinen måste stödja OpenGL; uppdatera drivrutinen om appen inte kan skapa grafikfönstret.
+## Canvas workflow
 
-På startsidan kan du skapa en PC eller öppna det inbyggda exemplet: AMX-PC → USB-hubb → webbkamera. Kameran är en etikett på hubbens USB-A 3, inte en egen enhetsbox. Exemplet har två individuella HDMI-portar på datorn.
+1. Create a port-bearing device with **New device** in the left sidebar. Create separate devices only when their ports need mapping, for example a computer, hub or mixer.
+2. Select **Edit** and a named side: **Front**, **Back**, **Left**, **Right**, **Top** or **Bottom**. Drag the device's edges or corner handles to resize the dimensions visible from that side. The hidden dimension and connector sizes stay unchanged.
+3. Drag any of the 20 connector icons from the right palette onto the visible device surface. Drag a placed port to reposition it on that surface.
+4. Double-click a port to name terminal equipment, such as **gaming mouse**. No extra device is created. Labels show only the attached equipment or connected device name; empty ports show **not connected**.
+5. Drag labels anywhere on the canvas. A leader line follows the physical port, and the layout is saved with the project.
+6. Right-click a port or label for **Rotate…**, **Connect to device…**, **Disconnect** or **Delete**. Rotation sets an absolute angle in degrees. To connect mapped devices, choose the other device and an available physical port. Dragging a device from the left list onto a port preselects that device in the connection dialog.
+7. Double-click a port connected to a mapped device to open that device immediately. Hover a linked port or its label to highlight the peer in the left list. Navigation works from either end of a cable.
+8. Save as `.cable.json`. Reopening restores models, ports, connections, rotations and label positions. **Ctrl+Z** restores a deleted port and its connection or reverses an entire drag gesture.
 
-1. Skapa portförsedda enheter med **Ny enhet** i vänsterspalten.
-2. Välj **Redigera**. Namnge och dimensionera höljets boxar eller kilar. Byggstenar kan kombineras och förskjutas i tre dimensioner.
-3. Välj en fast sidvy. Dra önskad portikon från högerpaletten och släpp på enhetens synliga yta. Alla 20 porttyper finns i paletten; scrolla för resten. En förhandsvisning visar placeringen. Dragningen aktiverar redigering och nivåvyn automatiskt.
-4. Dra porten på ytan, eller ange U/V i millimeter och rotation i grader. **Tillämpa ändringar** bekräftar formulärets värden. Giltiga formulärvärden bevaras även när du sparar, navigerar eller skapar annat innehåll.
-5. Dubbelklicka på en port och skriv t.ex. **gamingmus**. Namnet blir en etikett vid porten, utan att en separat enhet skapas. Skapa en portförsedd nod bara när dess anslutningar ska mappas, t.ex. en USB-hubb. Kablar till andra mappade enheter kopplas i inspektören.
-6. Växla mellan **Nivå för nivå** och **Hela trädet**. Vänsterlistan går direkt till varje enhet. Trädvyn visar alla grenar och har ingen expandera/kollapsa-funktion. Klick på en korttitel öppnar 3D-vyn; portval visar anslutningen i inspektören.
-7. Högerklicka på en placerad port och välj **Delete · Ta bort port**. Både port och anslutning tas bort; Ctrl+Z återställer dem.
-8. Spara som `.cable.json`. Återöppning återställer modeller, portar, anslutningar och standardvyer.
+The right panel contains only the port palette. There is no properties inspector, bottom port list or tree view. Right-click a device in the left list to rename or delete it. Right-click the canvas title to add a box or wedge building block. Each building block has resize handles in Edit mode.
 
-Vanliga hierarkikablar är riktade från överordnad enhet till underordnad enhet. Välj datorporten först och hubbens uppströmsport som mål. **Extralänk** tillåter avsiktlig kabeldragning utanför den acykliska hierarkin och visas orange i trädvyn. **Adapter** behövs när kabeln konverterar mellan olika kontaktfamiljer. Det är en dokumentation av manuell kabeldragning, inte elektrisk verifiering av en kabel.
+## Controls
 
-## Kontroller
-
-| Kontroll | Funktion |
+| Control | Action |
 |---|---|
-| Drag från en portikon i högerpaletten | Placera port på den synliga enhetsytan |
-| Dubbelklick på port eller dess etikett | Skriv eller ändra ansluten utrustnings namn |
-| Högerklick på port eller dess etikett | Meny med Delete och etikettredigering |
-| Vänsterdrag på en port i redigeringsläge | Placera på samma yta |
-| Mittenknapp + drag | Panorera modell |
-| Scroll eller +/− | Zoom |
-| Fram, Bak, Vänster, Höger, Topp, Botten | Mjukt animerade vybyten; modellen roteras enbart genom dessa val |
-| Standardvy | Återgå till enhetens sparade standardvy |
-| Ctrl+S / Ctrl+Skift+S | Spara / Spara som |
-| Ctrl+O / Ctrl+N | Öppna / Nytt projekt |
-| Ctrl+Z / Ctrl+Y | Ångra / Gör om |
+| Drag a palette icon | Place a physical port; automatically enables Edit |
+| Drag a port in Edit | Move it on its supporting surface |
+| Drag an edge or corner in Edit | Resize the device in the current side view |
+| Drag a label | Move its annotation, keeping the leader attached |
+| Double-click a port or label | Name equipment, or navigate to a connected device |
+| Right-click a port or label | Edit/open, rotate, connect, disconnect, delete |
+| Drag a device from the left list onto a port | Connect to that device |
+| Middle-button drag | Pan |
+| Wheel | Zoom |
+| Named side buttons | Animated side changes; no manual mouse orbit |
+| Reset view | Restore the device's saved default side and fit |
+| Ctrl+S / Ctrl+Shift+S | Save / Save as |
+| Ctrl+O / Ctrl+N | Open / New |
+| Ctrl+Z / Ctrl+Y | Undo / Redo |
 
-Porternas mått är nominella kontaktöppningar i mm. Höljesändringar skalar inte porterna. Zoom, markeringar och etiketter gör små portar läsbara utan att ändra deras fysiska proportioner. Portformen representerar kontakten; standardversion och kapacitet skrivs i metadatafältet.
+Normal cables form a directed hierarchy: choose the computer port as source and the hub's upstream port as target. Select **Supplementary connection outside the hierarchy** for intentional additional links or cycles. Select **Adapter / converting cable** when connector families differ. This documents physical cable routing; it does not verify electrical or protocol compatibility.
 
-## Lagring och återställning
+## Storage and recovery
 
-Formatet beskrivs i [docs/FORMAT.md](docs/FORMAT.md). Sparning validerar dokumentet och bevarar föregående fil som `.bak`. Windows använder `MoveFileExW` för atomisk ersättning; originalet tas aldrig bort före ersättning. Fel lämnar det öppna projektet och originalfilen kvar.
+The [version-1 JSON format](docs/FORMAT.md) remains compatible with previous releases. Existing user names are preserved. The interface and newly generated content use English.
 
-Osparade giltiga ändringar får ett separat återställningsutkast var 15:e sekund i `%LOCALAPPDATA%\CableManagement\recovery.cable.json`. Utkastet kan öppnas från vänsterspalten vid nästa start. En lyckad explicit sparning eller ett uttryckligt beslut att kasta ändringar rensar utkastet. Inget utkast öppnas automatiskt över ett sparat projekt. Ofullständiga ogiltiga inmatningsvärden kan inte skrivas som ett giltigt återställningsprojekt.
+Saving validates the project, writes a temporary sibling and preserves the previous file as `.bak`. Windows uses atomic `MoveFileExW` replacement. A failed load leaves the current document intact. A failed save preserves the previous file.
 
-## Arkitektur
+Valid unsaved changes receive a recovery draft every 15 seconds at `%LOCALAPPDATA%\CableManagement\recovery.cable.json`. **Recover previous draft** appears on the next launch. Explicit saving or discarding changes clears recovery. A recovery draft never replaces an opened project automatically.
 
-- `src/model.rs`: projekt, portidentitet, anslutningsintegritet, rötter och vägar.
-- `src/ports.rs`: typat, utbyggbart bibliotek med former, kontaktfamiljer och fysiska mått.
-- `src/geometry.rs`: 3D-ytor, ortografisk kamera, rotation, koordinatomvandling och synlighetskontroll.
-- `src/scene.rs`: native rendering av schematiska 3D-modeller och fysiska portar, markering och drag.
-- `src/tree.rs`: hela skogens layout; extralänkar duplicerar inte enheter.
-- `src/storage.rs`: versionerad JSON, validering, säker ersättning och återställning.
-- `src/ui.rs`: egui/eframe, de två navigeringsvyerna, editor och ändringsskydd.
-- `src/palette.rs`: alla portikoner och native dra-och-släpp.
-- `src/port_label.rs`: dubbelklicksdialog för enkla utrustningsetiketter.
+## Development
 
-3D-renderaren är skriven i Rust och ritar projicerade polygoner genom egui:s OpenGL-backend. Det ger en liten fristående exe och en schematisk modell utan en andra grafikmotor. Portplockning kontrollerar dold geometri. Boxar och kilar kan kombineras; detta är inte ett CAD-program med booleska operationer eller fotorealistisk rendering. Inget Tauri, Electron, HTML, CSS, JavaScript eller WebView används.
+- `model.rs`: identities, physical port fit, atomic rotation/resizing and graph integrity.
+- `geometry.rs`, `resize.rs`: surfaces, orthographic projection, visibility and fixed-side resize transforms.
+- `scene.rs`: native canvas rendering, picking, port/label/device gestures and leader lines.
+- `palette.rs`, `port_label.rs`, `ui.rs`: port library, contextual dialogs, device navigation, history and saving.
+- `storage.rs`: validated versioned JSON, safe replacement and recovery.
+- `tree.rs`: retained graph-layout utility; no tree view is exposed in the application.
 
-## Bygga och verifiera
+The renderer draws projected polygons through egui's OpenGL backend. There is no Electron, WebView, HTML or JavaScript. Box/wedge modeling is schematic; this is not a full CAD editor or automatic hardware inventory tool.
 
-Installera Rust stable och Visual Studio Build Tools med C++-komponenterna på Windows:
+On Windows, install Rust stable and Visual Studio Build Tools with C++ components:
 
 ```powershell
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 $env:RUSTFLAGS = '-C target-feature=+crt-static'
 cargo build --release --locked
 ```
 
-Programmet finns i `target\release\CableManagement.exe`. Det statiska C-runtimet innebär att ingen separat Visual C++-runtime behöver distribueras. GitHub Actions kör Windowskontrollerna och publicerar endast exe:n som byggartefakt.
+The executable is `target\release\CableManagement.exe`. GitHub Actions runs the Windows checks, builds the release and executes the native persistence diagnostic.
 
-Från Linux med MinGW-w64:
+Linux cross-compilation requires MinGW-w64:
 
 ```sh
 rustup target add x86_64-pc-windows-gnu
 cargo build --release --locked --target x86_64-pc-windows-gnu
 ```
 
-Konfigurationen i `.cargo/config.toml` länkar GNU-runtimet statiskt. `objdump -p` kan verifiera att exe:n enbart importerar Windows systembibliotek. För ett native starttest av grafiken på Linux krävs X11-bibliotek och en X-server; `cargo run` öppnar samma Rust-gränssnitt. Filvalet på Windows är en native systemdialog, på Linux en native sökvägsdialog.
+`.cargo/config.toml` links GNU runtime libraries statically. PE imports should contain only Windows system DLLs. Linux GUI checks need X11 and an X server. Windows uses native file pickers; Linux uses an in-app path dialog.
 
-Det levererade programmets `--self-test <rapportfil>` kontrollerar demokedjan och sparning/öppning inklusive Windows filersättning, utan att öppna ett GUI-fönster. Testet använder tillfälliga filer bredvid rapportfilen och rensar dem efteråt.
+`CableManagement.exe --self-test <reportfile>` verifies the graph, labels, rotation, resizing, layout persistence, save/open and Windows file replacement without a graphics window. It writes temporary files beside the report and removes them afterward.
 
-## Avgränsningar i v0.2.0
-
-Schematisk box-/kilmodellering och ortografisk visning; ingen full CAD, bildimport eller automatisk USB-/nätverksinventering. Kontaktbiblioteket kan utökas i Rust-koden. Vyvalet som sparas är en av de sex fasta vyerna. Modell- och trädvy använder samma dokument och duplicerar inte anslutningsdata.
-
-Källkod, tester och dokumentation hör till detta GitHub-repo. Leveransmappen i Google Drive innehåller endast `CableManagement.exe`; projektfiler och återställningsfiler skapas där användaren sparar dem eller i lokal appdata.
-
-Befintliga projekt i formatversion 1 kan öppnas utan konvertering. Porternas och kablarnas identiteter bevaras. Dubbelklick på en port som redan går till en mappad nod visar den anslutningen och erbjuder navigering; den ersätts aldrig automatiskt med en textetikett.
+Source, tests and documentation belong in this repository. The Google Drive delivery folder contains only `CableManagement.exe`; user project and recovery files are created locally when the application is used.

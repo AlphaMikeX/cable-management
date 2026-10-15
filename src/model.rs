@@ -25,12 +25,12 @@ impl Face {
     ];
     pub fn name(self) -> &'static str {
         match self {
-            Self::Front => "Fram",
-            Self::Back => "Bak",
-            Self::Left => "Vänster",
-            Self::Right => "Höger",
-            Self::Top => "Topp",
-            Self::Bottom => "Botten",
+            Self::Front => "Front",
+            Self::Back => "Back",
+            Self::Left => "Left",
+            Self::Right => "Right",
+            Self::Top => "Top",
+            Self::Bottom => "Bottom",
         }
     }
     pub fn axes(self) -> (usize, usize) {
@@ -57,6 +57,24 @@ pub struct Part {
     pub offset: [f32; 3],
 }
 impl Part {
+    fn validate_geometry(&self) -> Result<(), String> {
+        if self
+            .size
+            .iter()
+            .any(|x| !x.is_finite() || *x < 4. || *x > 5000.)
+            || self
+                .offset
+                .iter()
+                .any(|x| !x.is_finite() || x.abs() > 10000.)
+        {
+            return Err(
+                "Enclosure dimensions must be 4–5,000 mm and its position within ±10,000 mm."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     pub fn surface_size(&self, face: Face, uv: [f32; 2]) -> [f32; 2] {
         let (a, b) = face.axes();
         let mut size = [self.size[a], self.size[b]];
@@ -81,6 +99,9 @@ pub struct Port {
     pub face: Face,
     pub uv: [f32; 2],
     pub angle: f32,
+    /// Screen-plane displacement in millimetres from the socket; each coordinate is within ±10,000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label_offset: Option<[f32; 2]>,
     pub metadata: String,
 }
 impl Port {
@@ -177,7 +198,7 @@ impl Default for Project {
     fn default() -> Self {
         Self {
             version: FORMAT_VERSION,
-            name: "Mitt kabelprojekt".into(),
+            name: "My cable project".into(),
             next_id: 1,
             roots: vec![],
             nodes: vec![],
@@ -196,14 +217,14 @@ impl Project {
         uv: [f32; 2],
     ) -> Result<Id, String> {
         if uv.iter().any(|v| !v.is_finite() || v.abs() > 0.5) {
-            return Err("Släpp porten på en synlig yta på enheten.".into());
+            return Err("Drop the port on a visible device surface.".into());
         }
-        let n = self.node(node).ok_or("Enheten finns inte.")?;
+        let n = self.node(node).ok_or("The device does not exist.")?;
         let body = n
             .parts
             .iter()
             .find(|p| p.id == part)
-            .ok_or("Byggstenen finns inte.")?
+            .ok_or("The part does not exist.")?
             .clone();
         let mut index = 1;
         let name = loop {
@@ -226,13 +247,13 @@ impl Project {
     }
     pub fn label_port(&mut self, port: PortRef, text: &str) -> Result<(), String> {
         if self.port(port).is_none() {
-            return Err("Porten finns inte längre.".into());
+            return Err("The port no longer exists.".into());
         }
         let text = text.trim();
         let mut candidate = self.clone();
         if let Some(connection) = candidate.connection_at(port).cloned() {
             let Target::Endpoint(id) = connection.to else {
-                return Err("Porten är kopplad till en mappad enhet. Koppla loss kabeln först om du vill ersätta den med en textetikett.".into());
+                return Err("The port is connected to a mapped device. Disconnect the cable before replacing it with an equipment label.".into());
             };
             if text.is_empty() {
                 candidate.disconnect(port);
@@ -283,7 +304,7 @@ impl Project {
             name: name.into(),
             parts: vec![Part {
                 id: part,
-                name: "Hölje".into(),
+                name: "Enclosure".into(),
                 shape: Primitive::Box,
                 size,
                 offset: [0.; 3],
@@ -297,12 +318,12 @@ impl Project {
     }
     pub fn add_part(&mut self, node: Id, shape: Primitive) -> Result<Id, String> {
         if self.node(node).is_none() {
-            return Err("Enheten finns inte.".into());
+            return Err("The device does not exist.".into());
         }
         let id = self.allocate();
         self.node_mut(node).unwrap().parts.push(Part {
             id,
-            name: "Byggsten".into(),
+            name: "Part".into(),
             shape,
             size: [60., 40., 60.],
             offset: [0., 50., 0.],
@@ -310,8 +331,8 @@ impl Project {
         Ok(id)
     }
     pub fn add_port(&mut self, node: Id, kind: PortKind, name: &str) -> Result<Id, String> {
-        let n = self.node(node).ok_or("Enheten finns inte.")?;
-        let part = n.parts.first().ok_or("Skapa ett hölje först.")?.id;
+        let n = self.node(node).ok_or("The device does not exist.")?;
+        let part = n.parts.first().ok_or("Create an enclosure first.")?.id;
         let id = self.allocate();
         let mut p = Port {
             id,
@@ -321,6 +342,7 @@ impl Project {
             face: Face::Back,
             uv: [0.; 2],
             angle: 0.,
+            label_offset: None,
             metadata: String::new(),
         };
         p.clamp_to_part(&self.node(node).unwrap().parts[0]);
@@ -335,6 +357,84 @@ impl Project {
     }
     pub fn is_occupied(&self, r: PortRef) -> bool {
         self.connection_at(r).is_some()
+    }
+
+    pub fn connected_peer(&self, r: PortRef) -> Option<PortRef> {
+        let connection = self.connection_at(r)?;
+        let Target::Port(to) = connection.to else {
+            return None;
+        };
+        Some(if connection.from == r {
+            to
+        } else {
+            connection.from
+        })
+    }
+
+    /// The connected equipment or device name shown next to a physical socket.
+    pub fn port_label(&self, r: PortRef) -> String {
+        let name = self
+            .connection_at(r)
+            .and_then(|connection| match connection.to {
+                Target::Endpoint(id) => self.endpoint(id).map(|endpoint| endpoint.name.as_str()),
+                Target::Port(to) => {
+                    let peer = if connection.from == r {
+                        to
+                    } else {
+                        connection.from
+                    };
+                    self.node(peer.node).map(|node| node.name.as_str())
+                }
+            });
+        name.unwrap_or("not connected").into()
+    }
+
+    /// Set an absolute angle in degrees, keeping the socket on its supporting surface.
+    pub fn rotate_port(&mut self, r: PortRef, degrees: f32) -> Result<(), String> {
+        if !degrees.is_finite() {
+            return Err("Port rotation must be finite.".into());
+        }
+        let port = self.port(r).ok_or("The port no longer exists.")?;
+        let part = self
+            .node(r.node)
+            .and_then(|node| node.parts.iter().find(|part| part.id == port.part))
+            .ok_or("The port's supporting part is missing.")?
+            .clone();
+        let mut candidate = self.clone();
+        let port = candidate.port_mut(r).unwrap();
+        port.angle = degrees.rem_euclid(360.);
+        port.clamp_to_part(&part);
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
+    }
+
+    /// Resize and move a part, clamping every socket attached to it as one atomic edit.
+    pub fn resize_part(
+        &mut self,
+        node: Id,
+        part: Id,
+        size: [f32; 3],
+        offset: [f32; 3],
+    ) -> Result<(), String> {
+        let mut candidate = self.clone();
+        let device = candidate
+            .node_mut(node)
+            .ok_or("The device does not exist.")?;
+        let body = device
+            .parts
+            .iter_mut()
+            .find(|body| body.id == part)
+            .ok_or("The part does not exist.")?;
+        body.size = size;
+        body.offset = offset;
+        body.validate_geometry()?;
+        for port in device.ports.iter_mut().filter(|port| port.part == part) {
+            port.clamp_to_part(body);
+        }
+        candidate.validate()?;
+        *self = candidate;
+        Ok(())
     }
 
     pub fn connect(
@@ -362,7 +462,7 @@ impl Project {
     }
     pub fn connect_endpoint(&mut self, from: PortRef, name: &str) -> Result<Id, String> {
         if name.trim().is_empty() {
-            return Err("Ange slutpunktens namn.".into());
+            return Err("Enter the equipment name.".into());
         }
         let mut p = self.clone();
         let endpoint = p.allocate();
@@ -412,9 +512,9 @@ impl Project {
         }
     }
     pub fn remove_part(&mut self, node: Id, part: Id) -> Result<(), String> {
-        let n = self.node(node).ok_or("Enheten finns inte.")?;
+        let n = self.node(node).ok_or("The device does not exist.")?;
         if n.parts.len() <= 1 {
-            return Err("Enheten måste ha minst en byggsten.".into());
+            return Err("The device must have at least one part.".into());
         }
         let ports: Vec<_> = n
             .ports
@@ -495,20 +595,22 @@ impl Project {
     pub fn validate(&self) -> Result<(), String> {
         if self.version != FORMAT_VERSION {
             return Err(format!(
-                "Projektversion {} stöds inte (appen använder {}).",
+                "Project version {} is unsupported (this app uses {}).",
                 self.version, FORMAT_VERSION
             ));
         }
         if self.name.trim().is_empty() {
-            return Err("Projektet måste ha ett namn.".into());
+            return Err("The project must have a name.".into());
         }
         if self.nodes.len() > 5000 || self.connections.len() > 100000 {
-            return Err("Projektet är för stort (max 5 000 enheter / 100 000 kablar).".into());
+            return Err(
+                "The project is too large (maximum 5,000 devices / 100,000 cables).".into(),
+            );
         }
         let mut ids = HashSet::new();
         let mut take = |id| {
             if id == 0 || !ids.insert(id) {
-                Err("Projektet innehåller ogiltiga eller duplicerade identiteter.".to_string())
+                Err("The project contains invalid or duplicate IDs.".to_string())
             } else {
                 Ok(())
             }
@@ -520,38 +622,35 @@ impl Project {
             take(n.id)?;
             nodes.insert(n.id);
             if n.name.trim().is_empty() || n.parts.is_empty() {
-                return Err("Varje enhet behöver namn och hölje.".into());
+                return Err("Every device needs a name and an enclosure.".into());
             }
             let mut parts = HashMap::new();
             for part in &n.parts {
                 take(part.id)?;
                 parts.insert(part.id, part);
-                if part
-                    .size
-                    .iter()
-                    .any(|x| !x.is_finite() || *x < 4. || *x > 5000.)
-                    || part
-                        .offset
-                        .iter()
-                        .any(|x| !x.is_finite() || x.abs() > 10000.)
-                {
-                    return Err(
-                        "Höljets mått måste vara 4–5 000 mm och positionen inom ±10 000 mm.".into(),
-                    );
-                }
+                part.validate_geometry()?;
             }
             for p in &n.ports {
                 take(p.id)?;
                 if p.name.trim().is_empty() {
-                    return Err("Porten måste ha ett namn.".into());
+                    return Err("The port must have a name.".into());
                 }
-                let part = parts.get(&p.part).ok_or("En port saknar sin byggsten.")?;
+                let part = parts
+                    .get(&p.part)
+                    .ok_or("A port is missing its supporting part.")?;
                 if !p.angle.is_finite() || p.uv.iter().any(|v| !v.is_finite()) {
-                    return Err("Portens position eller rotation är ogiltig.".into());
+                    return Err("The port position or rotation is invalid.".into());
+                }
+                if p.label_offset
+                    .is_some_and(|offset| offset.iter().any(|v| !v.is_finite() || v.abs() > 10000.))
+                {
+                    return Err(
+                        "Port label coordinates must be finite and within ±10,000 mm.".into(),
+                    );
                 }
                 if !p.fits_on(part) {
                     return Err(format!(
-                        "Porten '{}' ryms inte på ytan. Öka höljet eller flytta porten.",
+                        "Port '{}' does not fit on the surface. Enlarge the enclosure or move the port.",
                         p.name
                     ));
                 }
@@ -568,7 +667,7 @@ impl Project {
             take(e.id)?;
             endpoint_ids.insert(e.id);
             if e.name.trim().is_empty() {
-                return Err("Slutpunkten saknar namn.".into());
+                return Err("The equipment name is missing.".into());
             }
         }
         let mut used = HashSet::new();
@@ -577,38 +676,45 @@ impl Project {
         let mut edges: HashMap<Id, Vec<Id>> = HashMap::new();
         for c in &self.connections {
             take(c.id)?;
-            let from = ports.get(&c.from).ok_or("En kabels startport saknas.")?;
+            let from = ports
+                .get(&c.from)
+                .ok_or("A cable source port is missing.")?;
             if !used.insert(c.from) {
-                return Err("En fysisk port är redan upptagen. Koppla loss kabeln först.".into());
+                return Err(
+                    "A physical port is already occupied. Disconnect the cable first.".into(),
+                );
             }
             match c.to {
                 Target::Endpoint(id) => {
                     if !endpoint_ids.contains(&id) {
-                        return Err("Kabelns slutpunkt saknas.".into());
+                        return Err("The cable equipment endpoint is missing.".into());
                     }
                     if !used_ends.insert(id) {
-                        return Err("Slutpunkten är redan ansluten.".into());
+                        return Err("The equipment is already connected.".into());
                     }
                     if c.supplementary {
-                        return Err("En slutpunkt behöver ingen extralänk.".into());
+                        return Err("Equipment does not need a supplementary link.".into());
                     }
                 }
                 Target::Port(to) => {
-                    let kind = ports.get(&to).ok_or("En kabels målport saknas.")?;
+                    let kind = ports
+                        .get(&to)
+                        .ok_or("A cable destination port is missing.")?;
                     if !used.insert(to) {
                         return Err(
-                            "En fysisk port är redan upptagen. Koppla loss kabeln först.".into(),
+                            "A physical port is already occupied. Disconnect the cable first."
+                                .into(),
                         );
                     }
                     if c.from.node == to.node {
-                        return Err("Välj en port på en annan enhet.".into());
+                        return Err("Choose a port on another device.".into());
                     }
                     if !c.adapter && !from.compatible(*kind) {
-                        return Err("Porttyperna kräver en adapter. Markera adapter om kabeln faktiskt konverterar mellan dem.".into());
+                        return Err("These port types require an adapter. Enable the adapter option if the cable converts between them.".into());
                     }
                     if !c.supplementary {
                         if parents.insert(to.node, c.from.node).is_some() {
-                            return Err("Enheten har redan en överordnad anslutning. Använd en uttrycklig extralänk.".into());
+                            return Err("The device already has a parent connection. Use an explicit supplementary link.".into());
                         }
                         edges.entry(c.from.node).or_default().push(to.node);
                     }
@@ -618,7 +724,7 @@ impl Project {
         let mut roots = HashSet::new();
         for id in &self.roots {
             if !nodes.contains(id) || !roots.insert(*id) || parents.contains_key(id) {
-                return Err("Projektets huvudnoder är ogiltiga.".into());
+                return Err("The project root devices are invalid.".into());
             }
         }
         if self
@@ -626,7 +732,7 @@ impl Project {
             .iter()
             .any(|n| !parents.contains_key(&n.id) && !roots.contains(&n.id))
         {
-            return Err("En fristående enhet saknas bland huvudnoderna.".into());
+            return Err("A standalone device is missing from the project roots.".into());
         }
         let mut degree: HashMap<_, usize> = nodes
             .iter()
@@ -651,21 +757,21 @@ impl Project {
             }
         }
         if count != nodes.len() {
-            return Err("Anslutningen skapar en cykel i trädet. Välj extralänk om det är avsiktlig kabeldragning.".into());
+            return Err("The connection creates a cycle in the tree. Choose a supplementary link if this wiring is intentional.".into());
         }
         if self.next_id <= ids.iter().copied().max().unwrap_or(0) || self.next_id == u64::MAX {
-            return Err("Projektets identitetsräknare är ogiltig.".into());
+            return Err("The project ID counter is invalid.".into());
         }
         Ok(())
     }
 
     pub fn demo() -> Self {
         let mut p = Self {
-            name: "Skrivbord · exempel".into(),
+            name: "Desktop · example".into(),
             ..Self::default()
         };
         let pc = p.add_node("AMX-PC", [210., 420., 380.]);
-        let hub = p.add_node("USB-hubb på skrivbordet", [105., 25., 45.]);
+        let hub = p.add_node("Desktop USB hub", [105., 25., 45.]);
         for (name, kind, uv) in [
             ("USB-A 1", PortKind::UsbA, [-0.22, 0.2]),
             ("USB-A 2", PortKind::UsbA, [-0.12, 0.2]),
@@ -676,7 +782,7 @@ impl Project {
             let id = p.add_port(pc, kind, name).unwrap();
             p.port_mut(PortRef { node: pc, port: id }).unwrap().uv = uv;
         }
-        let upstream = p.add_port(hub, PortKind::UsbC, "USB-C uppströms").unwrap();
+        let upstream = p.add_port(hub, PortKind::UsbC, "USB-C upstream").unwrap();
         for i in 0..4 {
             let id = p
                 .add_port(hub, PortKind::UsbA, &format!("USB-A {}", i + 1))
@@ -710,7 +816,7 @@ impl Project {
                 node: hub,
                 port: camera,
             },
-            "Webbkamera",
+            "Webcam",
         )
         .unwrap();
         p

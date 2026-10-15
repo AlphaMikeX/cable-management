@@ -13,13 +13,13 @@ pub fn backup_path(path: &Path) -> PathBuf {
 
 pub fn load(path: &Path) -> Result<Project, String> {
     let metadata =
-        fs::metadata(path).map_err(|e| format!("Kunde inte öppna '{}': {e}", path.display()))?;
+        fs::metadata(path).map_err(|e| format!("Could not open '{}': {e}", path.display()))?;
     if metadata.len() > 32 * 1024 * 1024 {
-        return Err("Projektfilen är större än 32 MB.".into());
+        return Err("The project file is larger than 32 MB.".into());
     }
-    let bytes = fs::read(path).map_err(|e| format!("Kunde inte läsa projektet: {e}"))?;
+    let bytes = fs::read(path).map_err(|e| format!("Could not read the project: {e}"))?;
     let project: Project = serde_json::from_slice(&bytes)
-        .map_err(|e| format!("Projektfilen är inte ett giltigt Cable Management-projekt: {e}"))?;
+        .map_err(|e| format!("The file is not a valid Cable Management project: {e}"))?;
     project.validate()?;
     Ok(project)
 }
@@ -27,7 +27,7 @@ pub fn load(path: &Path) -> Result<Project, String> {
 pub fn save(path: &Path, project: &Project) -> Result<(), String> {
     project.validate()?;
     let bytes = serde_json::to_vec_pretty(project)
-        .map_err(|e| format!("Kunde inte skriva projektet: {e}"))?;
+        .map_err(|e| format!("Could not write the project: {e}"))?;
     let mut temp = path.as_os_str().to_owned();
     temp.push(format!(".{}.tmp", std::process::id()));
     let temp = PathBuf::from(temp);
@@ -36,16 +36,16 @@ pub fn save(path: &Path, project: &Project) -> Result<(), String> {
             .create_new(true)
             .write(true)
             .open(&temp)
-            .map_err(|e| format!("Kunde inte spara i '{}': {e}", path.display()))?;
+            .map_err(|e| format!("Could not save to '{}': {e}", path.display()))?;
         file.write_all(&bytes)
             .and_then(|_| file.sync_all())
-            .map_err(|e| format!("Kunde inte skriva projektfilen: {e}"))?;
+            .map_err(|e| format!("Could not write the project file: {e}"))?;
         if path.exists() {
             // A backup is copied before replacement; failure preserves the original.
             fs::copy(path, backup_path(path))
-                .map_err(|e| format!("Kunde inte spara säkerhetskopian: {e}"))?;
+                .map_err(|e| format!("Could not save the backup: {e}"))?;
         }
-        replace_file(&temp, path).map_err(|e| format!("Kunde inte spara projektet: {e}"))?;
+        replace_file(&temp, path).map_err(|e| format!("Could not save the project: {e}"))?;
         Ok(())
     };
     let result = write();
@@ -96,7 +96,7 @@ pub fn recovery_path() -> PathBuf {
 pub fn save_recovery(project: &Project) -> Result<(), String> {
     let path = recovery_path();
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("Kunde inte spara återställning: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Could not save recovery data: {e}"))?;
     }
     save(&path, project)
 }

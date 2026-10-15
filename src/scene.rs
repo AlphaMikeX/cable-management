@@ -6,6 +6,26 @@ pub const ACCENT: Color32 = Color32::from_rgb(99, 221, 180);
 pub const MUTED: Color32 = Color32::from_rgb(142, 156, 168);
 pub const ORANGE: Color32 = Color32::from_rgb(255, 193, 112);
 
+struct ResizeDrag {
+    part: Part,
+    handle: [i8; 2],
+    origin: Pos2,
+    scale: f32,
+    camera: Camera,
+}
+#[derive(Clone, Copy)]
+pub struct NodeDrag {
+    pub node: Id,
+}
+
+#[derive(Clone, Copy)]
+struct LabelDrag {
+    id: Id,
+    offset: [f32; 2],
+    origin: Pos2,
+    scale: f32,
+}
+
 pub struct ViewState {
     pub camera: Camera,
     pub target: Camera,
@@ -14,6 +34,8 @@ pub struct ViewState {
     pub face: Face,
     pub pan: Vec2,
     drag_port: Option<Id>,
+    resize: Option<ResizeDrag>,
+    label_drag: Option<LabelDrag>,
     node: Option<Id>,
     context_port: Option<Id>,
 }
@@ -27,6 +49,8 @@ impl Default for ViewState {
             face: Face::Back,
             pan: Vec2::ZERO,
             drag_port: None,
+            resize: None,
+            label_drag: None,
             node: None,
             context_port: None,
         }
@@ -42,18 +66,29 @@ impl ViewState {
             self.zoom = 1.;
             self.pan = Vec2::ZERO;
             self.drag_port = None;
+            self.resize = None;
+            self.label_drag = None;
             self.context_port = None;
         }
         let (min, max) = node_bounds(node);
-        self.camera.center = mul(add(min, max), 0.5);
+        if self.resize.is_none() {
+            self.camera.center = mul(add(min, max), 0.5);
+        }
         self.target.center = self.camera.center;
     }
+    pub fn cancel_gestures(&mut self) {
+        self.drag_port = None;
+        self.resize = None;
+        self.label_drag = None;
+    }
     pub fn set_face(&mut self, face: Face) {
+        self.cancel_gestures();
         self.face = face;
         self.target = Camera::for_face(face);
         self.target.center = self.camera.center;
     }
     pub fn reset(&mut self) {
+        self.cancel_gestures();
         self.zoom = 1.;
         self.pan = Vec2::ZERO;
     }
@@ -68,6 +103,13 @@ pub struct SceneEvent {
     pub delete: Option<Id>,
     pub edit_label: Option<Id>,
     pub drop_rejected: bool,
+    pub rotate: Option<Id>,
+    pub connect: Option<Id>,
+    pub disconnect: Option<Id>,
+    pub label_moved: Option<(Id, [f32; 2])>,
+    pub resized: Option<(Id, [f32; 3], [f32; 3])>,
+    pub hovered_node: Option<Id>,
+    pub node_dropped: Option<(Id, Id)>,
 }
 #[derive(Clone, Copy, Debug)]
 pub struct PortDrop {
@@ -143,11 +185,24 @@ fn pick_socket(
 
 fn port_menu(response: &egui::Response, port: Id, event: &mut SceneEvent) {
     response.context_menu(|ui| {
-        if ui.button("Ange ansluten utrustning…").clicked() {
+        if ui.button("Edit connection / Open device…").clicked() {
             event.edit_label = Some(port);
             ui.close();
         }
-        if ui.button("Delete · Ta bort port").clicked() {
+        if ui.button("Rotate…").clicked() {
+            event.rotate = Some(port);
+            ui.close();
+        }
+        if ui.button("Connect to device…").clicked() {
+            event.connect = Some(port);
+            ui.close();
+        }
+        if ui.button("Disconnect").clicked() {
+            event.disconnect = Some(port);
+            ui.close();
+        }
+        ui.separator();
+        if ui.button("Delete").clicked() {
             event.delete = Some(port);
             ui.close();
         }
@@ -165,9 +220,19 @@ fn drop_preview(node: &Node, kind: PortKind, hit: SurfaceHit, camera: &Camera) -
         uv: hit.uv,
         angle: 0.,
         metadata: String::new(),
+        label_offset: None,
     };
     port.clamp_to_part(part);
     (port.fits_on(part) && port_visible(node, &port, camera)).then_some(port)
+}
+
+fn resize_cursor(handle: [i8; 2]) -> egui::CursorIcon {
+    match handle {
+        [0, _] => egui::CursorIcon::ResizeVertical,
+        [_, 0] => egui::CursorIcon::ResizeHorizontal,
+        [x, y] if x == y => egui::CursorIcon::ResizeNwSe,
+        _ => egui::CursorIcon::ResizeNeSw,
+    }
 }
 
 pub fn draw(
@@ -189,7 +254,11 @@ pub fn draw(
     }
     let (min, max) = node_bounds(node);
     let radius = length(sub(max, min)).max(20.);
-    let scale = (rect.width().min(rect.height()) * 0.78 / radius) * state.zoom;
+    let scale = state
+        .resize
+        .as_ref()
+        .map(|d| d.scale)
+        .unwrap_or((rect.width().min(rect.height()) * 0.78 / radius) * state.zoom);
     let center = rect.center() + state.pan;
     let to_screen = |point| {
         let (p, depth) = state.camera.project(point);
@@ -299,7 +368,8 @@ pub fn draw(
     // these visible surface details after the chassis so face-average depth
     // cannot hide a socket on the farther half of its own supporting polygon.
     polygons.sort_by(|a, b| a.socket.cmp(&b.socket).then(a.depth.total_cmp(&b.depth)));
-    for p in polygons {
+    let (socket_polygons, bodies): (Vec<_>, Vec<_>) = polygons.into_iter().partition(|p| p.socket);
+    for p in bodies {
         painter.add(Shape::convex_polygon(p.points, p.fill, p.stroke));
     }
     sockets.sort_by(|a, b| b.depth.total_cmp(&a.depth));
@@ -309,7 +379,83 @@ pub fn draw(
     let hovered = pointer
         .filter(|p| rect.contains(*p))
         .and_then(|p| pick_socket(&sockets, p, None, 9.));
-    let mut event = SceneEvent::default();
+    let mut event = SceneEvent {
+        hovered_node: hovered
+            .and_then(|s| {
+                project.connected_peer(PortRef {
+                    node: node.id,
+                    port: s.id,
+                })
+            })
+            .map(|p| p.node),
+        ..Default::default()
+    };
+    let settled = dot(state.camera.direction(), state.target.direction()) > 0.9999;
+    let mut resize_hit = None;
+    if editing && settled {
+        let mut bodies: Vec<_> = node.parts.iter().collect();
+        bodies.sort_by(|a, b| {
+            state
+                .camera
+                .project(a.offset)
+                .1
+                .total_cmp(&state.camera.project(b.offset).1)
+        });
+        for part in bodies {
+            let bounds = Rect::from_points(
+                &Face::ALL
+                    .into_iter()
+                    .flat_map(|f| face_vertices(part, f))
+                    .map(|p| to_screen(p).0)
+                    .collect::<Vec<_>>(),
+            );
+            for handle in [
+                [-1_i8, -1],
+                [0, -1],
+                [1, -1],
+                [-1, 0],
+                [1, 0],
+                [-1, 1],
+                [0, 1],
+                [1, 1],
+            ] {
+                let pos = bounds.center()
+                    + bounds.size() * Vec2::new(f32::from(handle[0]), f32::from(handle[1])) / 2.;
+                painter.rect_filled(Rect::from_center_size(pos, Vec2::splat(7.)), 1., ACCENT);
+            }
+            if let Some(point) = ui
+                .input(|i| {
+                    if i.pointer.primary_down() {
+                        i.pointer.press_origin()
+                    } else {
+                        pointer
+                    }
+                })
+                .filter(|p| bounds.expand(7.).contains(*p))
+            {
+                let dx = if (point.x - bounds.left()).abs() < 7. {
+                    -1
+                } else if (point.x - bounds.right()).abs() < 7. {
+                    1
+                } else {
+                    0
+                };
+                let dy = if (point.y - bounds.top()).abs() < 7. {
+                    -1
+                } else if (point.y - bounds.bottom()).abs() < 7. {
+                    1
+                } else {
+                    0
+                };
+                if dx != 0 || dy != 0 {
+                    resize_hit = Some((part, [dx, dy]));
+                }
+            }
+        }
+    }
+    if let Some((_, h)) = resize_hit.filter(|_| hovered.is_none()) {
+        ui.ctx().set_cursor_icon(resize_cursor(h));
+    }
     if response.clicked()
         && let Some(socket) = hovered
     {
@@ -328,6 +474,14 @@ pub fn draw(
         .filter(|id| node.ports.iter().any(|p| p.id == *id))
     {
         port_menu(&response, port, &mut event);
+    }
+    if let Some(payload) = response.dnd_hover_payload::<NodeDrag>()
+        && let Some(socket) = hovered
+    {
+        painter.circle_stroke(socket.center, 15., Stroke::new(2_f32, ACCENT));
+        if response.dnd_release_payload::<NodeDrag>().is_some() {
+            event.node_dropped = Some((socket.id, payload.node));
+        }
     }
     if editing && let Some(kind) = response.dnd_hover_payload::<PortKind>() {
         let candidate = pointer.and_then(|point| {
@@ -367,7 +521,7 @@ pub fn draw(
             }
         }
     }
-    if response.drag_started_by(egui::PointerButton::Primary) && editing {
+    if response.drag_started_by(egui::PointerButton::Primary) && editing && settled {
         // egui reports drag-start after threshold: use the original press point.
         let press = ui.input(|i| i.pointer.press_origin());
         let hit = press.and_then(|p| pick_socket(&sockets, p, selected, 12.));
@@ -375,29 +529,33 @@ pub fn draw(
             state.drag_port = Some(socket.id);
             event.selected = Some(socket.id);
             event.drag_started = true;
+        } else if let (Some((part, handle)), Some(origin)) = (resize_hit, press) {
+            state.resize = Some(ResizeDrag {
+                part: part.clone(),
+                handle,
+                origin,
+                scale,
+                camera: state.camera,
+            });
+            event.drag_started = true;
         }
     }
-    if let Some(id) = state.drag_port {
-        if response.dragged_by(egui::PointerButton::Primary)
-            && let (Some(position), Some(port)) = (pointer, node.ports.iter().find(|p| p.id == id))
-            && let Some(part) = node.parts.iter().find(|p| p.id == port.part)
-        {
-            let p = (position - center) / scale;
-            if let Some(uv) = face_uv_at(part, port.face, &state.camera, [p.x, p.y]) {
-                let mut copy = port.clone();
-                copy.uv = uv;
-                copy.clamp_to_part(part);
-                event.moved = Some((id, copy.uv));
-            }
+    if let Some(drag) = &state.resize {
+        if let Some(point) = pointer {
+            let delta = (point - drag.origin) / drag.scale;
+            let next =
+                crate::resize::resized(&drag.part, &drag.camera, drag.handle, [delta.x, delta.y]);
+            event.resized = Some((next.id, next.size, next.offset));
+            ui.ctx().set_cursor_icon(resize_cursor(drag.handle));
         }
         if !ui.input(|i| i.pointer.primary_down()) {
-            state.drag_port = None;
+            state.resize = None;
         }
     }
     if response.dragged_by(egui::PointerButton::Middle) {
         state.pan += ui.input(|i| i.pointer.delta());
     }
-    if response.hovered() {
+    if response.hovered() && state.resize.is_none() && state.label_drag.is_none() {
         let wheel = ui.input(|i| i.smooth_scroll_delta.y);
         if wheel != 0. {
             state.zoom = (state.zoom * (wheel * 0.0025).exp()).clamp(0.2, 18.);
@@ -412,11 +570,10 @@ pub fn draw(
     labels.sort_by(|a, b| a.center.y.total_cmp(&b.center.y));
     let mut last_y = rect.top() + 35.;
     for s in labels {
-        let text = if let Some(c) = &s.connection {
-            format!("{}  >  {}", s.name, c)
-        } else {
-            s.name.clone()
-        };
+        let text = project.port_label(PortRef {
+            node: node.id,
+            port: s.id,
+        });
         let galley = painter.layout_no_wrap(
             text,
             FontId::proportional(12.),
@@ -431,35 +588,148 @@ pub fn draw(
         let label_x = (s.center.x + 24.)
             .min(rect.right() - galley.size().x - 15.)
             .max(rect.left() + 12.);
-        let label_y = (s.center.y - 8.).max(last_y).min(rect.bottom() - 50.);
+        let mut label_y = (s.center.y - 8.).max(last_y).min(rect.bottom() - 50.);
+        for _ in 0..sockets.len() {
+            let bounds = Rect::from_min_size(
+                Pos2::new(label_x - 5., label_y - 3.),
+                galley.size() + Vec2::new(10., 6.),
+            );
+            if let Some(bottom) = sockets
+                .iter()
+                .map(|s| Rect::from_points(&s.points).expand(3.))
+                .filter(|r| r.intersects(bounds))
+                .map(|r| r.bottom())
+                .max_by(f32::total_cmp)
+            {
+                label_y = bottom + 7.;
+            } else {
+                break;
+            }
+        }
         last_y = label_y + 23.;
-        let pos = Pos2::new(label_x, label_y);
+        let default_offset = [
+            (label_x - s.center.x) / scale,
+            (label_y - s.center.y) / scale,
+        ];
+        let offset = node
+            .ports
+            .iter()
+            .find(|p| p.id == s.id)
+            .and_then(|p| p.label_offset)
+            .unwrap_or(default_offset);
+        let mut pos = s.center + Vec2::new(offset[0], offset[1]) * scale;
+        let initial_bg =
+            Rect::from_min_size(pos - Vec2::new(5., 3.), galley.size() + Vec2::new(10., 6.));
+        let label_response = ui.interact(
+            initial_bg,
+            ui.id().with(("port-label", s.id)),
+            Sense::click_and_drag(),
+        );
+        if label_response.drag_started_by(egui::PointerButton::Primary) {
+            let origin = ui.input(|i| i.pointer.press_origin()).unwrap_or(pos);
+            if let Some(socket) = pick_socket(&sockets, origin, selected, 0.) {
+                if editing && settled {
+                    state.drag_port = Some(socket.id);
+                    event.drag_started = true;
+                    event.selected = Some(socket.id);
+                }
+            } else {
+                state.label_drag = Some(LabelDrag {
+                    id: s.id,
+                    offset,
+                    origin,
+                    scale,
+                });
+                event.drag_started = true;
+                event.selected = Some(s.id);
+            }
+        }
+        if let Some(drag) = state.label_drag.filter(|d| d.id == s.id) {
+            let delta = (ui
+                .input(|i| i.pointer.interact_pos())
+                .unwrap_or(drag.origin)
+                - drag.origin)
+                / drag.scale;
+            let moved = [drag.offset[0] + delta.x, drag.offset[1] + delta.y];
+            {
+                event.label_moved = Some((drag.id, moved));
+                pos = s.center + Vec2::new(moved[0], moved[1]) * scale;
+            }
+        }
         let bg = Rect::from_min_size(pos - Vec2::new(5., 3.), galley.size() + Vec2::new(10., 6.));
         painter.line_segment(
-            [s.center, Pos2::new(bg.left(), bg.center().y)],
+            [s.center, bg.clamp(s.center)],
             Stroke::new(0.9_f32, Color32::from_rgb(125, 151, 155)),
         );
         painter.rect_filled(bg, 3., Color32::from_rgba_unmultiplied(15, 22, 29, 240));
         painter.galley(pos, galley, Color32::WHITE);
-        let label_response = ui.interact(bg, ui.id().with(("port-label", s.id)), Sense::click());
+        let hit = pointer
+            .and_then(|point| pick_socket(&sockets, point, None, 0.))
+            .map(|p| p.id)
+            .unwrap_or(s.id);
         if label_response.clicked() {
-            event.selected = Some(s.id);
+            event.selected = Some(hit);
         }
         if label_response.double_clicked() {
-            event.edit_label = Some(s.id);
+            event.edit_label = Some(hit);
         }
-        port_menu(&label_response, s.id, &mut event);
+        if label_response.hovered() || label_response.dragged() {
+            event.hovered_node = project
+                .connected_peer(PortRef {
+                    node: node.id,
+                    port: hit,
+                })
+                .map(|p| p.node);
+            ui.ctx().set_cursor_icon(if label_response.dragged() {
+                egui::CursorIcon::Grabbing
+            } else {
+                egui::CursorIcon::Grab
+            });
+        }
+        if label_response.secondary_clicked() {
+            state.context_port = Some(hit);
+        }
+        port_menu(
+            &label_response,
+            state.context_port.unwrap_or(s.id),
+            &mut event,
+        );
         if selected == Some(s.id) {
             painter.circle_stroke(s.center, 12., Stroke::new(1.5_f32, ORANGE));
         }
+    }
+    if let Some(id) = state.drag_port {
+        if let (Some(position), Some(port)) = (pointer, node.ports.iter().find(|p| p.id == id))
+            && let Some(part) = node.parts.iter().find(|p| p.id == port.part)
+        {
+            let p = (position - center) / scale;
+            if let Some(uv) = face_uv_at(part, port.face, &state.camera, [p.x, p.y]) {
+                let mut copy = port.clone();
+                copy.uv = uv;
+                copy.clamp_to_part(part);
+                event.moved = Some((id, copy.uv));
+            }
+        }
+        if !ui.input(|i| i.pointer.primary_down()) {
+            state.drag_port = None;
+        }
+    }
+    // Physical sockets remain visible and interactive above annotation boxes.
+    for p in socket_polygons {
+        painter.add(Shape::convex_polygon(p.points, p.fill, p.stroke));
+    }
+    if !ui.input(|i| i.pointer.primary_down()) {
+        state.label_drag = None;
     }
     if let Some(socket) = hovered {
         response.clone().on_hover_ui_at_pointer(|ui| {
             ui.strong(&socket.name);
             ui.label(&socket.kind);
-            ui.label(socket.connection.as_deref().unwrap_or("Ledig port"));
+            ui.label(socket.connection.as_deref().unwrap_or("not connected"));
             if editing {
-                ui.small("Dra för att flytta · dubbelklicka för text · högerklicka för Delete.");
+                ui.small(
+                    "Drag to move · double-click to edit or open device · right-click for actions.",
+                );
             }
         });
         ui.ctx().set_cursor_icon(if editing {
@@ -511,7 +781,7 @@ pub fn draw(
     painter.text(
         rect.left_top() + Vec2::new(20., 18.),
         Align2::LEFT_TOP,
-        format!("{}  /  {} portar synliga", state.face.name(), sockets.len()),
+        format!("{}  /  {} ports visible", state.face.name(), sockets.len()),
         FontId::proportional(11.),
         MUTED,
     );
@@ -521,6 +791,260 @@ pub fn draw(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn physical_socket_wins_over_a_neighbours_label_for_click_double_click_and_drag() {
+        let mut p = Project::default();
+        let node = p.add_node("PC", [200., 300., 200.]);
+        let a = p.add_port(node, PortKind::UsbA, "A").unwrap();
+        let b = p.add_port(node, PortKind::UsbA, "B").unwrap();
+        p.port_mut(PortRef { node, port: b }).unwrap().uv = [0.22, -0.01];
+        // Put A's label directly over B, as a user is allowed to do.
+        p.port_mut(PortRef { node, port: a }).unwrap().label_offset = Some([24., -4.]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let (_, out) = rendered(&ctx, &p, &mut state, 0., vec![]);
+        let target = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Path(path) if path.fill == Color32::from_rgb(11, 15, 20) => {
+                    Some(Rect::from_points(&path.points).center())
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.x.total_cmp(&b.x))
+            .unwrap();
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![egui::Event::PointerMoved(target)],
+        );
+        rendered(&ctx, &p, &mut state, 0.2, vec![press(target, true)]);
+        let (e, _) = rendered(&ctx, &p, &mut state, 0.25, vec![press(target, false)]);
+        assert_eq!(e.selected, Some(b));
+        rendered(&ctx, &p, &mut state, 0.3, vec![press(target, true)]);
+        let (e, _) = rendered(&ctx, &p, &mut state, 0.35, vec![press(target, false)]);
+        assert_eq!(e.edit_label, Some(b));
+        rendered(&ctx, &p, &mut state, 0.8, vec![press(target, true)]);
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.9,
+            vec![egui::Event::PointerMoved(target + Vec2::new(15., 25.))],
+        );
+        assert_eq!(e.selected, Some(b));
+        assert_eq!(e.moved.map(|p| p.0), Some(b));
+        assert!(e.label_moved.is_none());
+    }
+    fn rendered(
+        ctx: &egui::Context,
+        p: &Project,
+        state: &mut ViewState,
+        time: f64,
+        events: Vec<egui::Event>,
+    ) -> (SceneEvent, egui::FullOutput) {
+        let mut event = SceneEvent::default();
+        let output = ctx.run(
+            egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::new(800., 600.))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            },
+            |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    event = draw(ui, p, &p.nodes[0], None, true, state);
+                });
+            },
+        );
+        (event, output)
+    }
+    fn press(pos: Pos2, down: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+    #[test]
+    fn dragging_an_edge_resizes_from_a_frozen_projection_across_frames() {
+        let mut p = Project::default();
+        let node = p.add_node("Device", [200., 300., 200.]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let (_, out) = rendered(&ctx, &p, &mut state, 0., vec![]);
+        let bounds = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Path(path) if path.fill == Color32::from_rgb(74, 82, 91) => {
+                    Some(Rect::from_points(&path.points))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let start = bounds.right_center();
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![egui::Event::PointerMoved(start)],
+        );
+        rendered(&ctx, &p, &mut state, 0.2, vec![press(start, true)]);
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.3,
+            vec![egui::Event::PointerMoved(start + Vec2::new(40., 0.))],
+        );
+        assert!(e.drag_started);
+        let (part, size, offset) = e.resized.expect("edge drag must resize");
+        assert!(size[0] > 200.);
+        assert_eq!(size[1..], [300., 200.]);
+        p.resize_part(node, part, size, offset).unwrap();
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.4,
+            vec![egui::Event::PointerMoved(start + Vec2::new(80., 0.))],
+        );
+        let (_, next, _) = e.resized.unwrap();
+        assert!(
+            (next[0] - 200. - 2. * (size[0] - 200.)).abs() < 0.001,
+            "drag must not refit on each frame"
+        );
+        assert!(!e.drag_started);
+    }
+    #[test]
+    fn label_drag_moves_only_the_label_and_leader_follows_socket() {
+        let mut p = Project::default();
+        let node = p.add_node("Device", [200., 300., 200.]);
+        let port = p.add_port(node, PortKind::UsbA, "USB-A 1").unwrap();
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let (_, out) = rendered(&ctx, &p, &mut state, 0., vec![]);
+        let label = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Text(t) if t.galley.job.text == "not connected" => {
+                    Some(t.pos + t.galley.size() / 2.)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            !out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape,Shape::Text(t) if t.galley.job.text=="USB-A 1"))
+        );
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![egui::Event::PointerMoved(label)],
+        );
+        rendered(&ctx, &p, &mut state, 0.2, vec![press(label, true)]);
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.3,
+            vec![egui::Event::PointerMoved(label + Vec2::new(-80., 60.))],
+        );
+        let (id, offset) = e.label_moved.expect("label drag emits persistent layout");
+        assert_eq!(id, port);
+        assert!(e.drag_started);
+        assert!(e.moved.is_none());
+        assert!(e.resized.is_none());
+        p.port_mut(PortRef { node, port }).unwrap().label_offset = Some(offset);
+        let (_, out) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.4,
+            vec![press(label + Vec2::new(-80., 60.), false)],
+        );
+        assert_eq!(p.port(PortRef { node, port }).unwrap().uv, [0., 0.]);
+        let line = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::LineSegment { points, stroke }
+                    if stroke.color == Color32::from_rgb(125, 151, 155) =>
+                {
+                    Some(points)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!((line[0] - Pos2::new(400., 300.)).length() < 0.1);
+        assert!(line[0].distance(line[1]) > 30.);
+    }
+    #[test]
+    fn linked_port_hover_and_dragged_node_resolve_without_creating_nodes() {
+        let mut p = Project::default();
+        let node = p.add_node("PC", [200., 300., 200.]);
+        let port = p.add_port(node, PortKind::UsbA, "A").unwrap();
+        let hub = p.add_node("Hub", [80., 40., 80.]);
+        let inlet = p.add_port(hub, PortKind::UsbC, "Input").unwrap();
+        p.connect(
+            PortRef { node, port },
+            Target::Port(PortRef {
+                node: hub,
+                port: inlet,
+            }),
+            false,
+            false,
+        )
+        .unwrap();
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let (e, out) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(Pos2::new(400., 300.))],
+        );
+        assert_eq!(e.hovered_node, Some(hub));
+        assert!(
+            out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape,Shape::Text(t) if t.galley.job.text=="Hub"))
+        );
+        assert!(
+            !out.shapes
+                .iter()
+                .any(|s| matches!(&s.shape,Shape::Text(t) if t.galley.job.text.contains("Input")))
+        );
+        rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.1,
+            vec![press(Pos2::new(400., 300.), true)],
+        );
+        egui::DragAndDrop::set_payload(&ctx, NodeDrag { node: hub });
+        let (e, _) = rendered(
+            &ctx,
+            &p,
+            &mut state,
+            0.2,
+            vec![press(Pos2::new(400., 300.), false)],
+        );
+        assert_eq!(e.node_dropped, Some((port, hub)));
+        assert_eq!(p.nodes.len(), 2);
+    }
+
     #[test]
     fn drop_cannot_clamp_a_socket_behind_another_building_block() {
         let mut p = Project::default();
@@ -615,7 +1139,7 @@ mod tests {
             .shapes
             .iter()
             .find_map(|s| match &s.shape {
-                Shape::Text(t) if t.galley.job.text == "Delete · Ta bort port" => {
+                Shape::Text(t) if t.galley.job.text == "Delete" => {
                     Some(t.pos + t.galley.size() / 2.)
                 }
                 _ => None,

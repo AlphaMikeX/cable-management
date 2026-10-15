@@ -42,5 +42,5 @@ fn invalid_document_does_not_replace_previous_file() {
 fn save_to_missing_directory_returns_actionable_error() {
     let file = path("missing").join("project.json");
     let error = storage::save(&file, &Project::demo()).unwrap_err();
-    assert!(error.contains("spar") || error.contains("skriv"), "{error}");
+    assert!(error.contains("save") || error.contains("write"), "{error}");
 }

@@ -2,6 +2,7 @@
 
 mod palette;
 mod port_label;
+mod resize;
 mod scene;
 mod ui;
 
@@ -48,7 +49,20 @@ fn main() -> eframe::Result<()> {
             if storage::load(&file)? != annotated {
                 return Err("Port/label roundtrip mismatch".into());
             }
-            annotated.remove_port(PortRef { node, port });
+            let reference = PortRef { node, port };
+            annotated.rotate_port(reference, 405.)?;
+            annotated.port_mut(reference).unwrap().label_offset = Some([-35., 28.]);
+            annotated.resize_part(node, part, [230., 440., 390.], [10., 5., 0.])?;
+            if annotated.port(reference).unwrap().angle != 45.
+                || annotated.port_label(reference) != "gamingmus"
+            {
+                return Err("Canvas editing mismatch".into());
+            }
+            storage::save(&file, &annotated)?;
+            if storage::load(&file)? != annotated {
+                return Err("Canvas layout roundtrip mismatch".into());
+            }
+            annotated.remove_port(reference);
             annotated.validate()?;
             let _ = std::fs::remove_file(storage::backup_path(&file));
             let _ = std::fs::remove_file(&file);
@@ -58,7 +72,7 @@ fn main() -> eframe::Result<()> {
             Ok(()) => {
                 let _ = std::fs::write(
                     report,
-                    "PASS: graph, endpoint route, port placement, equipment labels, save/open and replacement backup\n",
+                    "PASS: graph, endpoint route, port placement, equipment labels, rotation, resizing, label layout, save/open and replacement backup\n",
                 );
             }
             Err(e) => {

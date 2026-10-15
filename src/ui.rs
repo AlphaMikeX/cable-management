@@ -3,21 +3,13 @@ use crate::{
     palette,
     port_label::{self, PortLabel},
 };
-use cable_management::{model::*, ports::PortKind, storage, tree};
-use eframe::egui::{
-    self, Align2, Color32, FontId, Key, Modifiers, Pos2, Rect, RichText, Sense, Stroke, Vec2,
-};
+use cable_management::{model::*, storage};
+use eframe::egui::{self, Color32, Key, Modifiers, RichText, Sense, Stroke, Vec2};
 use std::{
-    collections::HashMap,
     path::PathBuf,
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    Level,
-    Tree,
-}
 #[derive(Clone)]
 enum Pending {
     New,
@@ -32,22 +24,32 @@ enum FileDialog {
     Open,
 }
 
+struct RenameDevice {
+    node: Id,
+    text: String,
+    focus: bool,
+}
+struct RotatePort {
+    port: PortRef,
+    degrees: f32,
+}
+struct ConnectPorts {
+    source: PortRef,
+    target_node: Option<Id>,
+    target_port: Option<Id>,
+    supplementary: bool,
+    adapter: bool,
+}
+
 pub struct CableApp {
     project: Project,
     saved: Project,
     path: Option<PathBuf>,
     selected: Option<Id>,
     selected_port: Option<Id>,
-    selected_part: Option<Id>,
-    draft: Option<Node>,
-    cable_drafts: HashMap<Id, String>,
-    endpoint_drafts: HashMap<Id, String>,
-    mode: Mode,
+    hovered_node: Option<Id>,
     editing: bool,
     view: ViewState,
-    tree_pan: Vec2,
-    tree_zoom: f32,
-    tree_fit: bool,
     undo: Vec<Project>,
     redo: Vec<Project>,
     status: String,
@@ -61,11 +63,9 @@ pub struct CableApp {
     closing: bool,
     help: bool,
     port_label: Option<PortLabel>,
-    endpoint_name: String,
-    target_node: Option<Id>,
-    target_port: Option<Id>,
-    supplementary: bool,
-    adapter: bool,
+    rename_device: Option<RenameDevice>,
+    rotate_port: Option<RotatePort>,
+    connect_ports: Option<ConnectPorts>,
 }
 
 impl CableApp {
@@ -108,19 +108,12 @@ impl CableApp {
             path: loaded_path,
             selected,
             selected_port: None,
-            selected_part: None,
-            draft: None,
-            cable_drafts: HashMap::new(),
-            endpoint_drafts: HashMap::new(),
-            mode: Mode::Level,
+            hovered_node: None,
             editing: false,
             view: ViewState::default(),
-            tree_pan: Vec2::ZERO,
-            tree_zoom: 1.,
-            tree_fit: true,
             undo: vec![],
             redo: vec![],
-            status: "Lokalt projekt · inga konton behövs".into(),
+            status: "Local project · no account needed".into(),
             error,
             pending: None,
             after_save: None,
@@ -131,11 +124,9 @@ impl CableApp {
             closing: false,
             help: false,
             port_label: None,
-            endpoint_name: String::new(),
-            target_node: None,
-            target_port: None,
-            supplementary: false,
-            adapter: false,
+            rename_device: None,
+            rotate_port: None,
+            connect_ports: None,
         }
     }
     fn dirty(&self) -> bool {
@@ -145,45 +136,25 @@ impl CableApp {
         self.port_label
             .as_ref()
             .is_some_and(|e| e.has_changes(&self.project))
-            || self
-                .draft
-                .as_ref()
-                .is_some_and(|n| self.project.node(n.id) != Some(n))
-            || self.cable_drafts.iter().any(|(id, value)| {
+            || self.rename_device.as_ref().is_some_and(|draft| {
                 self.project
-                    .connections
-                    .iter()
-                    .find(|c| c.id == *id)
-                    .is_some_and(|c| &c.label != value)
+                    .node(draft.node)
+                    .is_some_and(|n| n.name != draft.text.trim())
             })
-            || self
-                .endpoint_drafts
-                .iter()
-                .any(|(id, value)| self.project.endpoint(*id).is_some_and(|e| &e.name != value))
     }
     fn with_drafts(&self) -> Project {
-        let mut p = self.project.clone();
-        if let Some(draft) = &self.draft
-            && let Some(node) = p.node_mut(draft.id)
+        let mut project = self.project.clone();
+        if let Some(draft) = &self.rename_device
+            && let Some(node) = project.node_mut(draft.node)
         {
-            *node = draft.clone();
-        }
-        for c in &mut p.connections {
-            if let Some(value) = self.cable_drafts.get(&c.id) {
-                c.label = value.clone();
-            }
-        }
-        for e in &mut p.endpoints {
-            if let Some(value) = self.endpoint_drafts.get(&e.id) {
-                e.name = value.clone();
-            }
+            node.name = draft.text.trim().into();
         }
         if let Some(editor) = &self.port_label
-            && editor.has_changes(&p)
+            && editor.has_changes(&project)
         {
-            let _ = p.label_port(editor.port, &editor.text);
+            let _ = project.label_port(editor.port, &editor.text);
         }
-        p
+        project
     }
     fn flush_draft(&mut self) -> bool {
         !self.has_drafts() || self.change(|_| Ok(()))
@@ -202,10 +173,7 @@ impl CableApp {
                 if p != self.project {
                     self.remember();
                     self.project = p;
-                    self.draft = None;
-                    self.cable_drafts.clear();
-                    self.endpoint_drafts.clear();
-                    self.tree_fit = false;
+                    self.rename_device = None;
                 }
                 true
             }
@@ -221,8 +189,7 @@ impl CableApp {
         }
         if self.selected != Some(node) {
             self.selected = Some(node);
-            self.selected_part = None;
-            self.draft = None;
+            self.rename_device = None;
         }
         self.selected_port = port;
         if let Some(p) = port.and_then(|id| self.project.port(PortRef { node, port: id })) {
@@ -241,16 +208,15 @@ impl CableApp {
         };
         self.path = path;
         self.port_label = None;
-        self.cable_drafts.clear();
-        self.endpoint_drafts.clear();
+        self.rename_device = None;
+        self.rotate_port = None;
+        self.connect_ports = None;
+        self.hovered_node = None;
         self.selected = self.project.roots.first().copied();
         self.selected_port = None;
-        self.selected_part = None;
-        self.draft = None;
         self.undo.clear();
         self.redo.clear();
         self.view = ViewState::default();
-        self.tree_fit = true;
         self.last_recovery = Instant::now();
     }
     fn begin(&mut self, action: Pending) {
@@ -281,7 +247,7 @@ impl CableApp {
             Pending::Recovery => {
                 if let Some(p) = self.recovery.take() {
                     self.reset_document(p, None, true);
-                    self.status = "Återställt utkast. Spara det som ett projekt.".into();
+                    self.status = "Draft recovered. Save it as a project.".into();
                 }
             }
             Pending::Open => self.open_dialog(),
@@ -316,7 +282,7 @@ impl CableApp {
             Ok(p) => {
                 self.clear_recovery();
                 self.reset_document(p, Some(path), false);
-                self.status = "Projekt öppnat.".into();
+                self.status = "Project opened.".into();
             }
             Err(e) => self.error = Some(e),
         }
@@ -334,7 +300,7 @@ impl CableApp {
         {
             if let Some(path) = rfd::FileDialog::new()
                 .add_filter("Cable Management", &["json"])
-                .set_file_name("Mitt projekt.cable.json")
+                .set_file_name("My project.cable.json")
                 .save_file()
             {
                 self.save_path(path);
@@ -348,7 +314,7 @@ impl CableApp {
                 .path
                 .as_ref()
                 .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "Mitt projekt.cable.json".into());
+                .unwrap_or_else(|| "My project.cable.json".into());
             self.file_dialog = Some(FileDialog::Save);
         }
     }
@@ -358,7 +324,7 @@ impl CableApp {
                 self.path = Some(path);
                 self.saved = self.project.clone();
                 self.clear_recovery();
-                self.status = "Projekt sparat. Föregående version finns som .bak.".into();
+                self.status = "Project saved. The previous version is kept as .bak.".into();
                 if let Some(action) = self.after_save.take() {
                     self.perform(action);
                 }
@@ -376,11 +342,11 @@ impl CableApp {
             Ok(())
         }) {
             self.select(id, None);
-            self.mode = Mode::Level;
             self.editing = true;
         }
     }
     fn history(&mut self, redo: bool) {
+        self.view.cancel_gestures();
         let previous = if redo {
             self.redo.pop()
         } else {
@@ -394,9 +360,10 @@ impl CableApp {
             }
             self.project = p;
             self.port_label = None;
-            self.draft = None;
-            self.cable_drafts.clear();
-            self.endpoint_drafts.clear();
+            self.rename_device = None;
+            self.rotate_port = None;
+            self.connect_ports = None;
+            self.hovered_node = None;
             if !self
                 .selected
                 .is_some_and(|id| self.project.node(id).is_some())
@@ -414,29 +381,29 @@ impl CableApp {
                 ui.label(RichText::new("CM").size(27.).color(ACCENT));
                 ui.label(RichText::new("CABLE MANAGEMENT").size(18.).strong());
                 ui.add_space(18.);
-                if ui.button("Nytt").clicked() {
+                if ui.button("New").clicked() {
                     self.begin(Pending::New);
                 }
-                if ui.button("Öppna").clicked() {
+                if ui.button("Open").clicked() {
                     self.begin(Pending::Open);
                 }
-                if ui.button("Spara").clicked() {
+                if ui.button("Save").clicked() {
                     self.save(false);
                 }
-                if ui.button("Spara som…").clicked() {
+                if ui.button("Save as…").clicked() {
                     self.save(true);
                 }
                 ui.separator();
                 if ui
-                    .add_enabled(!self.undo.is_empty(), egui::Button::new("Ångra"))
-                    .on_hover_text("Ångra · Ctrl+Z")
+                    .add_enabled(!self.undo.is_empty(), egui::Button::new("Undo"))
+                    .on_hover_text("Undo · Ctrl+Z")
                     .clicked()
                 {
                     self.history(false);
                 }
                 if ui
-                    .add_enabled(!self.redo.is_empty(), egui::Button::new("Gör om"))
-                    .on_hover_text("Gör om · Ctrl+Y")
+                    .add_enabled(!self.redo.is_empty(), egui::Button::new("Redo"))
+                    .on_hover_text("Redo · Ctrl+Y")
                     .clicked()
                 {
                     self.history(true);
@@ -446,12 +413,8 @@ impl CableApp {
                         self.help = true;
                     }
                     ui.label(
-                        RichText::new(if self.dirty() {
-                            "+ Osparat"
-                        } else {
-                            "+ Sparat"
-                        })
-                        .color(if self.dirty() { ORANGE } else { ACCENT }),
+                        RichText::new(if self.dirty() { "+ Unsaved" } else { "+ Saved" })
+                            .color(if self.dirty() { ORANGE } else { ACCENT }),
                     );
                 });
             });
@@ -459,17 +422,9 @@ impl CableApp {
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(RichText::new(&self.project.name).color(MUTED));
-                ui.add_space(18.);
-                ui.selectable_value(&mut self.mode, Mode::Level, "NIVÅ FÖR NIVÅ");
-                if ui
-                    .selectable_value(&mut self.mode, Mode::Tree, "HELA TRÄDET")
-                    .clicked()
-                {
-                    self.tree_fit = true;
-                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.selectable_value(&mut self.editing, true, " · Redigera");
-                    ui.selectable_value(&mut self.editing, false, "Visa");
+                    ui.selectable_value(&mut self.editing, true, "Edit");
+                    ui.selectable_value(&mut self.editing, false, "View");
                 });
             });
             ui.add_space(5.);
@@ -480,7 +435,7 @@ impl CableApp {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(
                         RichText::new(format!(
-                            "{} enheter · {} portar · {} kablar",
+                            "{} devices · {} ports · {} cables",
                             self.project.nodes.len(),
                             self.project
                                 .nodes
@@ -503,749 +458,243 @@ impl CableApp {
             .width_range(180.0..=300.0)
             .show(ctx, |ui| {
                 ui.add_space(12.);
-                section(ui, "ANSLUTNINGSNODER");
-                ui.label(
-                    RichText::new("Direkt till den fysiska enheten")
-                        .size(11.)
-                        .color(MUTED),
-                );
+                section(ui, "DEVICES");
+                ui.label(RichText::new("Map the physical device").size(11.).color(MUTED));
                 ui.add_space(10.);
-                let nodes: Vec<_> = self
-                    .project
-                    .nodes
-                    .iter()
-                    .map(|n| {
-                        (
-                            n.id,
-                            n.name.clone(),
-                            n.ports.len(),
-                            self.project.roots.contains(&n.id),
-                        )
-                    })
-                    .collect();
+                let nodes: Vec<_> = self.project.nodes.iter().map(|node| {
+                    (node.id, node.name.clone(), node.ports.len())
+                }).collect();
                 egui::ScrollArea::vertical()
-                    .max_height((ui.available_height() - 200.).max(100.))
+                    .max_height((ui.available_height() - 225.).max(100.))
                     .show(ui, |ui| {
-                        for (id, name, count, root) in nodes {
-                            let text = format!(
-                                "{} {}\n    {} portar",
-                                if root { "Huvudnod ·" } else { "" },
-                                name,
-                                count
+                        for (id, name, count) in nodes {
+                            let response = ui.add_sized(
+                                [ui.available_width(), 54.],
+                                egui::Button::new(format!("{name}\n{count} ports"))
+                                    .selected(self.selected == Some(id) || self.hovered_node == Some(id))
+                                    .sense(Sense::click_and_drag()),
                             );
-                            if ui
-                                .add_sized(
-                                    [ui.available_width(), 54.],
-                                    egui::Button::new(text).selected(self.selected == Some(id)),
-                                )
-                                .clicked()
-                            {
+                            response.dnd_set_drag_payload(scene::NodeDrag { node: id });
+                            if response.clicked() {
                                 self.select(id, None);
-                                self.mode = Mode::Level;
                             }
+                            response.context_menu(|ui| {
+                                if ui.button("Rename device…").clicked() {
+                                    self.start_rename(id);
+                                    ui.close();
+                                }
+                                if ui.button(RichText::new("Delete device").color(ORANGE)).clicked() {
+                                    self.delete_device(id);
+                                    ui.close();
+                                }
+                            });
                         }
                     });
                 ui.add_space(14.);
                 ui.separator();
-                ui.menu_button("+ Ny enhet", |ui| {
-                    if ui.button("Dator / PC").clicked() {
-                        self.add_node("Ny PC", [210., 420., 380.]);
-                        ui.close();
-                    }
-                    if ui.button("USB-hubb").clicked() {
-                        self.add_node("Ny USB-hubb", [105., 25., 45.]);
-                        ui.close();
-                    }
-                    if ui.button("Ljudmixer").clicked() {
-                        self.add_node("Ny ljudmixer", [280., 70., 220.]);
-                        ui.close();
-                    }
-                    if ui.button("Egen enhet").clicked() {
-                        self.add_node("Ny enhet", [150., 80., 100.]);
-                        ui.close();
+                ui.menu_button("+ New device", |ui| {
+                    for (label, name, size) in [
+                        ("Computer / PC", "New PC", [210., 420., 380.]),
+                        ("USB hub", "New USB hub", [105., 25., 45.]),
+                        ("Audio mixer", "New audio mixer", [280., 70., 220.]),
+                        ("Custom device", "New device", [150., 80., 100.]),
+                    ] {
+                        if ui.button(label).clicked() {
+                            self.add_node(name, size);
+                            ui.close();
+                        }
                     }
                 });
                 ui.add_space(12.);
-                ui.label(
-                    RichText::new(
-                        "Skapa enheter bara när deras portar ska mappas, t.ex. en hubb. Dubbelklicka en port för att skriva gamingmus, kamera eller annan utrustning som en etikett.",
-                    )
-                    .size(11.)
-                    .color(MUTED),
-                );
+                ui.label(RichText::new(
+                    "Create a device when its ports need mapping. Double-click a port to name equipment. Drag a device onto a port to connect it."
+                ).size(11.).color(MUTED));
                 if self.recovery.is_some() {
                     ui.add_space(18.);
-                    if ui.button("Återställ föregående utkast").clicked() {
+                    if ui.button("Recover previous draft").clicked() {
                         self.begin(Pending::Recovery);
                     }
                 }
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    ui.small(RichText::new("NATIVE RUST  /  OFFLINE\nv0.2.0").color(MUTED));
+                    ui.small(RichText::new(concat!("NATIVE RUST  /  OFFLINE\nv", env!("CARGO_PKG_VERSION"))).color(MUTED));
                 });
             });
     }
 
-    fn inspector(&mut self, ctx: &egui::Context) {
-        egui::SidePanel::right("inspector")
-            .default_width(330.)
-            .width_range(305.0..=480.0)
+    fn palette_panel(&mut self, ctx: &egui::Context) {
+        egui::SidePanel::right("port-palette")
+            .default_width(300.)
+            .width_range(270.0..=400.0)
             .show(ctx, |ui| {
+                ui.add_space(12.);
                 if palette::show(ui, self.selected.is_some()) {
                     self.editing = true;
-                    self.mode = Mode::Level;
                 }
-                egui::ScrollArea::vertical()
-                    .id_salt("inspector-scroll")
-                    .show(ui, |ui| {
-                        ui.add_space(12.);
-                        let Some(id) = self.selected else {
-                            section(ui, "PROJEKT");
-                            ui.label("Skapa en enhet för att börja placera fysiska portar.");
-                            return;
-                        };
-                        let Some(original) = self.project.node(id).cloned() else {
-                            return;
-                        };
-                        section(ui, "ENHET");
-                        ui.heading(&original.name);
-                        if self.project.roots.contains(&id) {
-                            ui.label(
-                                RichText::new("Huvudnod / fristående enhet")
-                                    .size(11.)
-                                    .color(ACCENT),
-                            );
-                        } else if let Some(c) = self.project.parent(id) {
-                            ui.label(
-                                RichText::new(format!(
-                                    "Via {}",
-                                    self.project.target_label(
-                                        c,
-                                        match c.to {
-                                            Target::Port(r) => r,
-                                            _ => c.from,
-                                        }
-                                    )
-                                ))
-                                .size(11.)
-                                .color(MUTED),
-                            );
-                        }
-                        if !self.editing {
-                            ui.label(
-                                RichText::new("Välj Redigera för att ändra modell och kablar.")
-                                    .size(11.)
-                                    .color(MUTED),
-                            );
-                        }
-                        ui.add_space(8.);
-                        let mut draft = self
-                            .draft
-                            .clone()
-                            .filter(|n| n.id == id)
-                            .unwrap_or_else(|| original.clone());
-                        ui.add_enabled_ui(self.editing, |ui| {
-                            ui.label("Namn");
-                            ui.text_edit_singleline(&mut draft.name);
-                            if self.selected_part.is_none() {
-                                self.selected_part = draft.parts.first().map(|p| p.id);
-                            }
-                            egui::ComboBox::from_id_salt("part-select")
-                                .selected_text(
-                                    draft
-                                        .parts
-                                        .iter()
-                                        .find(|p| Some(p.id) == self.selected_part)
-                                        .map(|p| p.name.as_str())
-                                        .unwrap_or("Byggsten"),
-                                )
-                                .show_ui(ui, |ui| {
-                                    for p in &draft.parts {
-                                        ui.selectable_value(
-                                            &mut self.selected_part,
-                                            Some(p.id),
-                                            &p.name,
-                                        );
-                                    }
-                                });
-                            if let Some(part) = draft
-                                .parts
-                                .iter_mut()
-                                .find(|p| Some(p.id) == self.selected_part)
-                            {
-                                ui.text_edit_singleline(&mut part.name);
-                                egui::ComboBox::from_id_salt("shape")
-                                    .selected_text(if part.shape == Primitive::Box {
-                                        "Box"
-                                    } else {
-                                        "Kil"
-                                    })
-                                    .show_ui(ui, |ui| {
-                                        ui.selectable_value(&mut part.shape, Primitive::Box, "Box");
-                                        ui.selectable_value(
-                                            &mut part.shape,
-                                            Primitive::Wedge,
-                                            "Kil / sluttande ovansida",
-                                        );
-                                    });
-                                ui.label(
-                                    RichText::new("MÅTT I MM · X / Y / Z")
-                                        .size(10.)
-                                        .color(MUTED),
-                                );
-                                ui.horizontal(|ui| {
-                                    for value in &mut part.size {
-                                        ui.add(
-                                            egui::DragValue::new(value)
-                                                .range(4.0..=5000.0)
-                                                .speed(1.)
-                                                .max_decimals(1),
-                                        );
-                                    }
-                                });
-                                ui.label(
-                                    RichText::new("POSITION I MM · X / Y / Z")
-                                        .size(10.)
-                                        .color(MUTED),
-                                );
-                                ui.horizontal(|ui| {
-                                    for value in &mut part.offset {
-                                        ui.add(
-                                            egui::DragValue::new(value)
-                                                .range(-10000.0..=10000.0)
-                                                .speed(1.)
-                                                .max_decimals(1),
-                                        );
-                                    }
-                                });
-                            }
-                            self.draft = Some(draft.clone());
-                            ui.horizontal(|ui| {
-                                if ui.small_button("+ Box").clicked()
-                                    && self.change(|p| p.add_part(id, Primitive::Box).map(|_| ()))
-                                {
-                                    draft = self.project.node(id).unwrap().clone();
-                                    self.selected_part = draft.parts.last().map(|p| p.id);
-                                }
-                                if ui.small_button("+ Kil").clicked()
-                                    && self.change(|p| p.add_part(id, Primitive::Wedge).map(|_| ()))
-                                {
-                                    draft = self.project.node(id).unwrap().clone();
-                                    self.selected_part = draft.parts.last().map(|p| p.id);
-                                }
-                                if ui
-                                    .add_enabled(
-                                        draft.parts.len() > 1,
-                                        egui::Button::new("Ta bort byggsten").small(),
-                                    )
-                                    .clicked()
-                                    && let Some(part) = self.selected_part
-                                    && self.change(|p| p.remove_part(id, part))
-                                {
-                                    draft = self.project.node(id).unwrap().clone();
-                                    self.selected_part = draft.parts.first().map(|p| p.id);
-                                }
-                            });
-                            egui::ComboBox::from_id_salt("default-view")
-                                .selected_text(format!("Standardvy: {}", draft.default_view.name()))
-                                .show_ui(ui, |ui| {
-                                    for face in Face::ALL {
-                                        ui.selectable_value(
-                                            &mut draft.default_view,
-                                            face,
-                                            face.name(),
-                                        );
-                                    }
-                                });
-                        });
-                        ui.add_space(10.);
-                        ui.separator();
-                        section(ui, "PORTAR");
-                        let mut select_port = None;
-                        for port in &original.ports {
-                            let connected = self.project.is_occupied(PortRef {
-                                node: id,
-                                port: port.id,
-                            });
-                            if ui
-                                .selectable_label(
-                                    self.selected_port == Some(port.id),
-                                    RichText::new(format!(
-                                        "{} {}  ·  {}",
-                                        if connected { "+" } else { "o" },
-                                        port.name,
-                                        port.face.name()
-                                    ))
-                                    .color(if connected {
-                                        ACCENT
-                                    } else {
-                                        MUTED
-                                    }),
-                                )
-                                .clicked()
-                            {
-                                select_port = Some(port.id);
-                            }
-                        }
-                        if let Some(port) = select_port {
-                            self.select(id, Some(port));
-                        }
-                        ui.small(
-                            "Lägg till portar genom att dra en ikon från portbiblioteket ovanför.",
-                        );
-                        if let Some(port_id) = self.selected_port {
-                            let reference = PortRef {
-                                node: id,
-                                port: port_id,
-                            };
-                            if let Some(port) = draft.ports.iter_mut().find(|p| p.id == port_id) {
-                                ui.add_space(8.);
-                                section(ui, "VALD FYSISK PORT");
-                                ui.add_enabled_ui(self.editing, |ui| {
-                                    ui.text_edit_singleline(&mut port.name);
-                                    egui::ComboBox::from_id_salt("port-kind")
-                                        .selected_text(port.kind.name())
-                                        .show_ui(ui, |ui| {
-                                            for kind in PortKind::ALL {
-                                                ui.selectable_value(
-                                                    &mut port.kind,
-                                                    kind,
-                                                    kind.name(),
-                                                );
-                                            }
-                                        });
-                                    egui::ComboBox::from_id_salt("port-part")
-                                        .selected_text(
-                                            draft
-                                                .parts
-                                                .iter()
-                                                .find(|p| p.id == port.part)
-                                                .map(|p| p.name.as_str())
-                                                .unwrap_or("?"),
-                                        )
-                                        .show_ui(ui, |ui| {
-                                            for part in &draft.parts {
-                                                ui.selectable_value(
-                                                    &mut port.part,
-                                                    part.id,
-                                                    &part.name,
-                                                );
-                                            }
-                                        });
-                                    egui::ComboBox::from_id_salt("port-face")
-                                        .selected_text(format!("Yta: {}", port.face.name()))
-                                        .show_ui(ui, |ui| {
-                                            for face in Face::ALL {
-                                                ui.selectable_value(
-                                                    &mut port.face,
-                                                    face,
-                                                    face.name(),
-                                                );
-                                            }
-                                        });
-                                    if let Some(part) =
-                                        draft.parts.iter().find(|p| p.id == port.part)
-                                    {
-                                        let size = part.surface_size(port.face, port.uv);
-                                        let mut u = port.uv[0] * size[0];
-                                        let mut v = port.uv[1] * size[1];
-                                        ui.label(
-                                            RichText::new("PLACERING FRÅN YTANS MITT · MM")
-                                                .size(10.)
-                                                .color(MUTED),
-                                        );
-                                        ui.horizontal(|ui| {
-                                            if ui
-                                                .add(
-                                                    egui::DragValue::new(&mut u)
-                                                        .prefix("U ")
-                                                        .speed(0.5)
-                                                        .max_decimals(1),
-                                                )
-                                                .changed()
-                                            {
-                                                port.uv[0] = u / size[0];
-                                            }
-                                            if ui
-                                                .add(
-                                                    egui::DragValue::new(&mut v)
-                                                        .prefix("V ")
-                                                        .speed(0.5)
-                                                        .max_decimals(1),
-                                                )
-                                                .changed()
-                                            {
-                                                port.uv[1] = v / size[1];
-                                            }
-                                        });
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.label("Rotation");
-                                        ui.add(
-                                            egui::DragValue::new(&mut port.angle)
-                                                .suffix("°")
-                                                .range(-360.0..=360.0)
-                                                .speed(1.),
-                                        );
-                                        if ui.small_button("90°").clicked() {
-                                            port.angle = (port.angle + 90.).rem_euclid(360.);
-                                        }
-                                    });
-                                    ui.text_edit_singleline(&mut port.metadata)
-                                        .on_hover_text("Version / kapacitet / egna anteckningar");
-                                });
-                                let [w, h] = port.kind.dimensions();
-                                ui.label(
-                                    RichText::new(format!("Fysisk storlek: {w} × {h} mm"))
-                                        .size(11.)
-                                        .color(MUTED),
-                                );
-                            }
-                            self.draft = Some(draft.clone());
-                            if let Some(c) = self.project.connection_at(reference).cloned() {
-                                ui.add_space(8.);
-                                ui.label(RichText::new("ANSLUTEN TILL").size(10.).color(ACCENT));
-                                ui.strong(self.project.target_label(&c, reference));
-                                if c.supplementary {
-                                    ui.small("Extralänk · ingår inte i hierarkin");
-                                }
-                                if c.adapter {
-                                    ui.small("Adapter / konverterande kabel");
-                                }
-                                if !c.label.is_empty() {
-                                    ui.label(&c.label);
-                                }
-                                let mut cable_label = self
-                                    .cable_drafts
-                                    .get(&c.id)
-                                    .cloned()
-                                    .unwrap_or_else(|| c.label.clone());
-                                if self.editing {
-                                    ui.horizontal(|ui| {
-                                        ui.text_edit_singleline(&mut cable_label)
-                                            .on_hover_text("Kabeletikett / färg");
-                                        if ui.small_button("Sätt").clicked() {
-                                            self.change(|p| {
-                                                p.connections
-                                                    .iter_mut()
-                                                    .find(|x| x.id == c.id)
-                                                    .unwrap()
-                                                    .label = cable_label.clone();
-                                                Ok(())
-                                            });
-                                        }
-                                    });
-                                    self.cable_drafts.insert(c.id, cable_label);
-                                }
-                                match c.to {
-                                    Target::Port(to) => {
-                                        let other = if c.from == reference { to } else { c.from };
-                                        if ui.button("Gå till den andra porten >").clicked() {
-                                            self.select(other.node, Some(other.port));
-                                            self.mode = Mode::Level;
-                                        }
-                                    }
-                                    Target::Endpoint(endpoint) => {
-                                        let route = self.project.route_to_endpoint(endpoint);
-                                        let text = route
-                                            .iter()
-                                            .map(|r| {
-                                                format!(
-                                                    "{} [{}]",
-                                                    self.project.node(r.node).unwrap().name,
-                                                    self.project.port(*r).unwrap().name
-                                                )
-                                            })
-                                            .collect::<Vec<_>>()
-                                            .join(" > ");
-                                        ui.label(RichText::new(text).size(11.).color(MUTED));
-                                        if self.editing {
-                                            let mut name = self
-                                                .endpoint_drafts
-                                                .get(&endpoint)
-                                                .cloned()
-                                                .unwrap_or_else(|| {
-                                                    self.project
-                                                        .endpoint(endpoint)
-                                                        .unwrap()
-                                                        .name
-                                                        .clone()
-                                                });
-                                            ui.horizontal(|ui| {
-                                                ui.text_edit_singleline(&mut name);
-                                                if ui.small_button("Byt namn").clicked() {
-                                                    self.change(|p| {
-                                                        p.endpoints
-                                                            .iter_mut()
-                                                            .find(|e| e.id == endpoint)
-                                                            .unwrap()
-                                                            .name = name.clone();
-                                                        Ok(())
-                                                    });
-                                                }
-                                            });
-                                            self.endpoint_drafts.insert(endpoint, name);
-                                        }
-                                    }
-                                }
-                                if self.editing && ui.button("Koppla loss kabel").clicked() {
-                                    self.change(|p| {
-                                        p.disconnect(reference);
-                                        Ok(())
-                                    });
-                                    draft = self.project.node(id).unwrap().clone();
-                                }
-                            } else if self.project.port(reference).is_some() {
-                                ui.label(RichText::new("LEDIG PORT").color(MUTED));
-                                if self.editing {
-                                    self.connection_editor(ui, reference);
-                                }
-                            }
-                            if self.editing
-                                && ui
-                                    .button(
-                                        RichText::new("Ta bort port och dess kabel").color(ORANGE),
-                                    )
-                                    .clicked()
-                                && self.change(|p| {
-                                    p.remove_port(reference);
-                                    Ok(())
-                                })
-                            {
-                                self.selected_port = None;
-                                draft = self.project.node(id).unwrap().clone();
-                            }
-                        }
-                        ui.add_space(10.);
-                        if self.editing {
-                            if draft != original {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .button(RichText::new("Tillämpa ändringar").color(ACCENT))
-                                        .clicked()
-                                    {
-                                        let replacement = draft.clone();
-                                        if self.change(|p| {
-                                            *p.node_mut(id).unwrap() = replacement;
-                                            Ok(())
-                                        }) {
-                                            draft = self.project.node(id).unwrap().clone();
-                                            if let Some(port) =
-                                                self.selected_port.and_then(|port| {
-                                                    self.project.port(PortRef { node: id, port })
-                                                })
-                                            {
-                                                self.view.set_face(port.face);
-                                            }
-                                        }
-                                    }
-                                    if ui.button("Återställ").clicked() {
-                                        draft = self.project.node(id).unwrap().clone();
-                                    }
-                                });
-                            }
-                            ui.add_space(10.);
-                            ui.separator();
-                            if ui
-                                .button(RichText::new("Ta bort enhet").color(ORANGE))
-                                .on_hover_text(
-                                    "Tar även bort enhetens portar och kablar. Kan ångras.",
-                                )
-                                .clicked()
-                                && self.change(|p| {
-                                    p.remove_node(id);
-                                    Ok(())
-                                })
-                            {
-                                self.selected = self.project.roots.first().copied();
-                                self.selected_port = None;
-                                self.draft = None;
-                                return;
-                            }
-                        }
-                        if self.selected == Some(id) {
-                            self.draft = Some(draft);
-                        }
-                    });
             });
     }
 
-    fn connection_editor(&mut self, ui: &mut egui::Ui, reference: PortRef) {
-        section(ui, "KOPPLA EN KABEL");
-        ui.label("Slutpunkt · bara en etikett");
-        ui.text_edit_singleline(&mut self.endpoint_name)
-            .on_hover_text("Exempel: Webbkamera, Stream Deck, mikrofon");
-        if ui
-            .add_enabled(
-                !self.endpoint_name.trim().is_empty(),
-                egui::Button::new("Anslut slutpunkt"),
-            )
-            .clicked()
-        {
-            let name = self.endpoint_name.clone();
-            if self.change(|p| p.connect_endpoint(reference, &name).map(|_| ())) {
-                self.endpoint_name.clear();
+    fn start_rename(&mut self, node: Id) {
+        if !self.flush_draft() {
+            return;
+        }
+        if let Some(node) = self.project.node(node) {
+            self.rename_device = Some(RenameDevice {
+                node: node.id,
+                text: node.name.clone(),
+                focus: true,
+            });
+        }
+    }
+
+    fn delete_device(&mut self, node: Id) {
+        if self.change(|project| {
+            project.remove_node(node);
+            Ok(())
+        }) {
+            if self.selected == Some(node) {
+                self.selected = self.project.roots.first().copied();
+                self.selected_port = None;
             }
+            self.hovered_node = None;
+            self.status = "Device and its connections deleted. Ctrl+Z restores them.".into();
         }
-        ui.add_space(8.);
-        ui.label("Port på en annan enhet");
-        let nodes: Vec<_> = self
-            .project
-            .nodes
-            .iter()
-            .filter(|n| n.id != reference.node)
-            .map(|n| (n.id, n.name.clone()))
-            .collect();
-        if !self
-            .target_node
-            .is_some_and(|id| nodes.iter().any(|n| n.0 == id))
-        {
-            self.target_node = nodes.first().map(|n| n.0);
-            self.target_port = None;
+    }
+
+    fn open_port(&mut self, port: PortRef) {
+        if !self.flush_draft() {
+            return;
         }
-        let selected = self.target_node;
-        egui::ComboBox::from_id_salt("target-node")
-            .selected_text(
-                nodes
-                    .iter()
-                    .find(|n| Some(n.0) == self.target_node)
-                    .map(|n| n.1.as_str())
-                    .unwrap_or("Skapa en annan enhet"),
-            )
-            .show_ui(ui, |ui| {
-                for (id, name) in &nodes {
-                    ui.selectable_value(&mut self.target_node, Some(*id), name);
-                }
+        if let Some(peer) = self.project.connected_peer(port) {
+            self.port_label = None;
+            self.select(peer.node, Some(peer.port));
+        } else {
+            self.selected_port = Some(port.port);
+            self.port_label = PortLabel::new(&self.project, port);
+        }
+    }
+
+    fn open_connect(&mut self, source: PortRef, target_node: Option<Id>) {
+        if self.flush_draft() && self.project.port(source).is_some() {
+            self.connect_ports = Some(ConnectPorts {
+                source,
+                target_node: target_node.filter(|id| *id != source.node),
+                target_port: None,
+                supplementary: false,
+                adapter: false,
             });
-        if self.target_node != selected {
-            self.target_port = None;
         }
-        let ports: Vec<_> = self
-            .target_node
-            .and_then(|id| self.project.node(id))
-            .map(|n| {
-                n.ports
-                    .iter()
-                    .map(|p| {
-                        (
-                            p.id,
-                            p.name.clone(),
-                            p.kind,
-                            self.project.is_occupied(PortRef {
-                                node: n.id,
-                                port: p.id,
-                            }),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        if !self
-            .target_port
-            .is_some_and(|id| ports.iter().any(|p| p.0 == id && !p.3))
-        {
-            self.target_port = ports.iter().find(|p| !p.3).map(|p| p.0);
-        }
-        egui::ComboBox::from_id_salt("target-port")
-            .selected_text(
-                ports
-                    .iter()
-                    .find(|p| Some(p.0) == self.target_port)
-                    .map(|p| format!("{} · {}", p.1, p.2.name()))
-                    .unwrap_or_else(|| "Ingen ledig port".into()),
-            )
-            .show_ui(ui, |ui| {
-                for (id, name, kind, used) in &ports {
-                    ui.add_enabled_ui(!used, |ui| {
-                        ui.selectable_value(
-                            &mut self.target_port,
-                            Some(*id),
-                            format!(
-                                "{} · {}{}",
-                                name,
-                                kind.name(),
-                                if *used { " (upptagen)" } else { "" }
-                            ),
-                        );
-                    });
-                }
-            });
-        ui.checkbox(&mut self.supplementary, "Extralänk utanför trädhierarkin");
-        ui.checkbox(&mut self.adapter, "Kabeln har en adapter / konverterare");
-        if ui
-            .add_enabled(
-                self.target_port.is_some(),
-                egui::Button::new("Anslut enheterna"),
-            )
-            .clicked()
-            && let (Some(node), Some(port)) = (self.target_node, self.target_port)
-        {
-            let supplementary = self.supplementary;
-            let adapter = self.adapter;
-            self.change(|p| {
-                p.connect(
-                    reference,
+    }
+
+    fn connect_selected(&mut self) -> bool {
+        let Some(dialog) = &self.connect_ports else {
+            return false;
+        };
+        let (Some(node), Some(port)) = (dialog.target_node, dialog.target_port) else {
+            return false;
+        };
+        let (source, supplementary, adapter) =
+            (dialog.source, dialog.supplementary, dialog.adapter);
+        if self.change(|project| {
+            project
+                .connect(
+                    source,
                     Target::Port(PortRef { node, port }),
                     supplementary,
                     adapter,
                 )
                 .map(|_| ())
-            });
+        }) {
+            self.connect_ports = None;
+            self.status =
+                "Devices connected. Double-click either port to open the other device.".into();
+            true
+        } else {
+            false
         }
     }
 
     fn apply_scene_event(&mut self, node: Id, event: scene::SceneEvent) {
+        self.hovered_node = event.hovered_node;
         if let Some(port) = event.selected {
             self.selected_port = Some(port);
         }
         if event.drag_started && self.flush_draft() {
             self.remember();
         }
-        if let Some((port, uv)) = event.moved {
+        // A gesture has one undo snapshot; its frames update only valid candidates.
+        if event.moved.is_some() || event.label_moved.is_some() || event.resized.is_some() {
             let mut candidate = self.with_drafts();
-            if let Some(p) = candidate.port_mut(PortRef { node, port }) {
-                p.uv = uv;
+            if let Some((port, uv)) = event.moved
+                && let Some(port) = candidate.port_mut(PortRef { node, port })
+            {
+                port.uv = uv;
             }
-            if candidate.validate().is_ok() {
+            if let Some((port, offset)) = event.label_moved
+                && let Some(port) = candidate.port_mut(PortRef { node, port })
+            {
+                port.label_offset = Some(offset);
+            }
+            let resized = event.resized.map_or(Ok(()), |(part, size, offset)| {
+                candidate.resize_part(node, part, size, offset)
+            });
+            if resized.and_then(|_| candidate.validate()).is_ok() {
                 self.project = candidate;
-                self.draft = None;
-                self.cable_drafts.clear();
-                self.endpoint_drafts.clear();
+                self.rename_device = None;
             }
         }
         if let Some(drop) = event.dropped {
             let mut id = 0;
-            if self.change(|p| {
-                id = p.place_port(node, drop.kind, drop.hit.part, drop.hit.face, drop.hit.uv)?;
+            if self.change(|project| {
+                id = project.place_port(
+                    node,
+                    drop.kind,
+                    drop.hit.part,
+                    drop.hit.face,
+                    drop.hit.uv,
+                )?;
                 Ok(())
             }) {
                 self.selected_port = Some(id);
-                self.selected_part = Some(drop.hit.part);
-                self.editing = true;
-                self.status =
-                    "Port placerad. Dubbelklicka för att ange ansluten utrustning.".into();
+                self.status = "Port placed. Double-click it to name connected equipment.".into();
             }
         }
         if event.drop_rejected {
-            self.status = "Släpp porten på en synlig yta där kontakten får plats.".into();
+            self.status = "Drop the port on a visible surface with room for the connector.".into();
         }
         if let Some(port) = event.delete
-            && self.change(|p| {
-                p.remove_port(PortRef { node, port });
+            && self.change(|project| {
+                project.remove_port(PortRef { node, port });
                 Ok(())
             })
         {
             if self.selected_port == Some(port) {
                 self.selected_port = None;
             }
-            self.editing = true;
-            self.status = "Porten och dess anslutning borttagna. Ctrl+Z ångrar.".into();
+            self.status = "Port and connection deleted. Ctrl+Z restores them.".into();
         }
-        if let Some(port) = event.edit_label
+        if let Some(port) = event.edit_label {
+            self.open_port(PortRef { node, port });
+        }
+        if let Some(port) = event.rotate
             && self.flush_draft()
+            && let Some(source) = self.project.port(PortRef { node, port })
         {
-            self.selected_port = Some(port);
-            self.editing = true;
-            self.port_label = PortLabel::new(&self.project, PortRef { node, port });
+            self.rotate_port = Some(RotatePort {
+                port: PortRef { node, port },
+                degrees: source.angle,
+            });
+        }
+        if let Some(port) = event.connect {
+            self.open_connect(PortRef { node, port }, None);
+        }
+        if let Some((port, target_node)) = event.node_dropped {
+            self.open_connect(PortRef { node, port }, Some(target_node));
+        }
+        if let Some(port) = event.disconnect {
+            self.change(|project| {
+                project.disconnect(PortRef { node, port });
+                Ok(())
+            });
         }
     }
 
@@ -1257,8 +706,8 @@ impl CableApp {
         ui.add_space(8.);
         ui.horizontal(|ui| {
             for id in self.project.ancestors(node.id) {
-                if let Some(n) = self.project.node(id) {
-                    let name = n.name.clone();
+                if let Some(device) = self.project.node(id) {
+                    let name = device.name.clone();
                     if ui.selectable_label(id == node.id, name).clicked() {
                         self.select(id, None);
                     }
@@ -1268,19 +717,28 @@ impl CableApp {
                 }
             }
         });
-        ui.horizontal(|ui| {
-            ui.heading(&node.name);
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(
-                    RichText::new(if self.editing {
-                        "REDIGERINGSLÄGE"
-                    } else {
-                        "VISNINGSLÄGE"
-                    })
-                    .size(10.)
-                    .color(if self.editing { ORANGE } else { ACCENT }),
-                );
-            });
+        let title =
+            ui.add(egui::Label::new(RichText::new(&node.name).heading()).sense(Sense::click()));
+        title.context_menu(|ui| {
+            if ui.button("Rename device…").clicked() {
+                self.start_rename(node.id);
+                ui.close();
+            }
+            if ui.button("Add box").clicked() {
+                self.change(|project| project.add_part(node.id, Primitive::Box).map(|_| ()));
+                ui.close();
+            }
+            if ui.button("Add wedge").clicked() {
+                self.change(|project| project.add_part(node.id, Primitive::Wedge).map(|_| ()));
+                ui.close();
+            }
+            if ui
+                .button(RichText::new("Delete device").color(ORANGE))
+                .clicked()
+            {
+                self.delete_device(node.id);
+                ui.close();
+            }
         });
         ui.add_space(4.);
         self.view.select(&node);
@@ -1293,354 +751,232 @@ impl CableApp {
                     self.view.set_face(face);
                 }
             }
-            if ui.button("Standardvy").clicked() {
+            if ui.button("Reset view").clicked() {
                 self.view.set_face(node.default_view);
                 self.view.reset();
             }
-            if ui.small_button("−").clicked() {
-                self.view.zoom = (self.view.zoom / 1.25).max(0.2);
-            }
-            if ui.small_button("+").clicked() {
-                self.view.zoom = (self.view.zoom * 1.25).min(18.);
-            }
-            ui.checkbox(&mut self.view.labels, "Etiketter");
+            ui.checkbox(&mut self.view.labels, "Labels");
         });
-        ui.label(
-            RichText::new(if self.editing {
-                "Dra portar från biblioteket · dubbelklicka för text · högerklicka för Delete"
-            } else {
-                "Välj sida med knapparna · dubbelklicka en port för text · scrolla för zoom"
-            })
-            .size(11.)
-            .color(MUTED),
-        );
+        ui.label(RichText::new(
+            "Drag ports from the palette · double-click to name equipment or open its device · right-click for actions"
+        ).size(11.).color(MUTED));
         ui.add_space(5.);
-        // The lower connection list provides accessible port selection even for hidden faces.
-        let list_height = (node.ports.len() as f32 * 34. + 45.).clamp(60., 225.);
-        let scene_height = (ui.available_height() - list_height - 10.).max(200.);
-        let mut event = None;
-        ui.allocate_ui_with_layout(
-            Vec2::new(ui.available_width(), scene_height),
-            egui::Layout::top_down(egui::Align::LEFT),
-            |ui| {
-                event = Some(scene::draw(
-                    ui,
-                    &self.project,
-                    &node,
-                    self.selected_port,
-                    self.editing,
-                    &mut self.view,
-                ));
-            },
+        let previous_hover = self.hovered_node;
+        let event = scene::draw(
+            ui,
+            &self.project,
+            &node,
+            self.selected_port,
+            self.editing,
+            &mut self.view,
         );
-        if let Some(event) = event {
-            self.apply_scene_event(node.id, event);
+        self.apply_scene_event(node.id, event);
+        if self.hovered_node != previous_hover {
+            ui.ctx().request_repaint();
         }
-        ui.add_space(4.);
-        egui::ScrollArea::vertical()
-            .id_salt("level-connections")
-            .max_height(list_height)
-            .show(ui, |ui| {
-                if node.ports.is_empty() {
-                    ui.label(
-                        RichText::new(
-                            "Inga portar ännu. Välj Redigera och lägg till från portbiblioteket.",
-                        )
-                        .color(MUTED),
-                    );
-                }
-                for port in &node.ports {
-                    let r = PortRef {
-                        node: node.id,
-                        port: port.id,
-                    };
-                    let connection = self.project.connection_at(r).cloned();
-                    ui.horizontal(|ui| {
-                        if ui
-                            .selectable_label(
-                                self.selected_port == Some(port.id),
-                                format!(
-                                    "{}  {}",
-                                    if connection.is_some() { "+" } else { "o" },
-                                    port.name
-                                ),
-                            )
-                            .clicked()
-                        {
-                            self.select(node.id, Some(port.id));
-                        }
-                        ui.label(RichText::new(port.kind.name()).size(11.).color(MUTED));
-                        if let Some(c) = connection {
-                            let label = self.project.target_label(&c, r);
-                            match c.to {
-                                Target::Port(to) => {
-                                    let other = if c.from == r { to } else { c.from };
-                                    if ui
-                                        .button(RichText::new(format!("> {label}")).color(ACCENT))
-                                        .clicked()
-                                    {
-                                        self.select(other.node, Some(other.port));
-                                    }
-                                }
-                                Target::Endpoint(_) => {
-                                    ui.label(RichText::new(format!("> {label}")).color(ACCENT));
-                                }
-                            }
-                        } else {
-                            ui.label(RichText::new("Ledig").size(11.).color(MUTED));
-                        }
-                    });
-                }
-            });
     }
 
     fn welcome(&mut self, ui: &mut egui::Ui) {
-        ui.vertical_centered(|ui|{
-            ui.add_space((ui.available_height()*0.17).max(35.));ui.label(RichText::new("CM").size(72.).color(ACCENT));ui.add_space(15.);
-            ui.label(RichText::new("Var sitter kabeln?").size(31.).strong());ui.add_space(10.);
-            ui.label(RichText::new("Bygg en fysisk karta över ditt skrivbord.\nRätt enhet. Rätt port. Enkel återinkoppling.").size(16.).color(MUTED));ui.add_space(24.);
-            if ui.add_sized([230.,44.],egui::Button::new(RichText::new("+ Skapa din första PC").color(ACCENT))).clicked(){self.add_node("Min PC",[210.,420.,380.]);}
-            if ui.add_sized([230.,40.],egui::Button::new("Öppna fungerande exempel")).clicked(){self.begin(Pending::Demo);}
-            ui.add_space(16.);ui.label(RichText::new("Exemplet visar PC > USB-hubb > webbkamera.\nSlutpunkter är etiketter, enheter har portar.").size(12.).color(MUTED));
+        ui.vertical_centered(|ui| {
+            ui.add_space((ui.available_height() * 0.17).max(35.));
+            ui.label(RichText::new("CM").size(72.).color(ACCENT));
+            ui.add_space(15.);
+            ui.label(RichText::new("Where does this cable go?").size(31.).strong());
+            ui.add_space(10.);
+            ui.label(RichText::new("Build a physical map of your desk.\nThe right device. The right port. Easy reconnection.").size(16.).color(MUTED));
+            ui.add_space(24.);
+            if ui.add_sized([230., 44.], egui::Button::new(RichText::new("+ Create your first PC").color(ACCENT))).clicked() {
+                self.add_node("My PC", [210., 420., 380.]);
+            }
+            if ui.add_sized([230., 40.], egui::Button::new("Open an example")).clicked() {
+                self.begin(Pending::Demo);
+            }
+            ui.add_space(16.);
+            ui.label(RichText::new("The example maps PC > USB hub > webcam.\nEquipment names are labels; mapped devices have ports.").size(12.).color(MUTED));
         });
     }
 
-    fn full_tree(&mut self, ui: &mut egui::Ui) {
-        if self.project.nodes.is_empty() {
-            self.welcome(ui);
-            return;
-        }
-        ui.add_space(8.);
-        ui.horizontal(|ui| {
-            ui.heading("Hela anslutningsträdet");
-            if ui.button("Anpassa till fönstret").clicked() {
-                self.tree_fit = true;
-            }
-            if ui.small_button("−").clicked() {
-                self.tree_zoom = (self.tree_zoom / 1.2).max(0.15);
-            }
-            if ui.small_button("+").clicked() {
-                self.tree_zoom = (self.tree_zoom * 1.2).min(2.5);
-            }
-        });
-        ui.label(RichText::new("Alla grenar visas · dra bakgrunden för panorering · scrolla för zoom · välj en port eller öppna 3D").size(11.).color(MUTED));
-        ui.add_space(7.);
-        let (response, painter) = ui.allocate_painter(ui.available_size(), Sense::click_and_drag());
-        let rect = response.rect;
-        painter.rect_filled(rect, 0., Color32::from_rgb(18, 24, 31));
-        let placements = tree::layout(&self.project);
-        let mut heights: HashMap<usize, f32> = HashMap::new();
-        for place in &placements {
-            let depth = (place.position[1] / 310.).round() as usize;
-            let height = self
-                .project
-                .node(place.id)
-                .map(|n| 90. + n.ports.len() as f32 * 24.)
-                .unwrap_or(90.);
-            heights
-                .entry(depth)
-                .and_modify(|h| *h = h.max(height))
-                .or_insert(height);
-        }
-        let mut ys = HashMap::new();
-        let mut y = 0.;
-        for depth in 0..=heights.keys().copied().max().unwrap_or(0) {
-            ys.insert(depth, y);
-            y += heights.get(&depth).copied().unwrap_or(90.) + 90.;
-        }
-        let positions: HashMap<_, _> = placements
-            .iter()
-            .map(|p| {
-                (
-                    p.id,
-                    Vec2::new(
-                        p.position[0],
-                        ys[&((p.position[1] / 310.).round() as usize)],
-                    ),
-                )
-            })
-            .collect();
-        let min_x = positions
-            .values()
-            .map(|p| p.x - 145.)
-            .fold(f32::INFINITY, f32::min);
-        let max_x = positions.values().map(|p| p.x + 145.).fold(0., f32::max);
-        if self.tree_fit {
-            self.tree_zoom = ((rect.width() - 50.) / (max_x - min_x).max(300.))
-                .min((rect.height() - 50.) / y.max(150.))
-                .clamp(0.15, 1.2);
-            self.tree_pan = Vec2::new(
-                rect.width() / 2. - (min_x + max_x) / 2. * self.tree_zoom,
-                25.,
-            );
-            self.tree_fit = false;
-        }
-        let origin = rect.left_top() + self.tree_pan;
-        let scale = self.tree_zoom;
-        let node_rect = |id| {
-            let n = self.project.node(id).unwrap();
-            let p = positions[&id];
-            Rect::from_min_size(
-                origin + Vec2::new(p.x - 145., p.y) * scale,
-                Vec2::new(290., 90. + n.ports.len() as f32 * 24.) * scale,
-            )
-        };
-        let anchor = |r: PortRef, right: bool| {
-            let n = self.project.node(r.node).unwrap();
-            let index = n.ports.iter().position(|p| p.id == r.port).unwrap_or(0);
-            let card = node_rect(r.node);
-            Pos2::new(
-                if right { card.right() } else { card.left() },
-                card.top() + (73. + index as f32 * 24.) * scale,
-            )
-        };
-        for c in &self.project.connections {
-            if let Target::Port(to) = c.to {
-                if !positions.contains_key(&c.from.node) || !positions.contains_key(&to.node) {
-                    continue;
+    fn action_dialogs(&mut self, ctx: &egui::Context) {
+        // Read Enter before numeric/text widgets consume it while committing their value.
+        let submit = ctx.input(|input| input.key_pressed(Key::Enter));
+        if let Some(mut draft) = self.rename_device.take() {
+            let mut apply = false;
+            let mut cancel = false;
+            egui::Modal::new(egui::Id::new("rename-device")).show(ctx, |ui| {
+                ui.heading("Rename device");
+                let response =
+                    ui.add_sized([370., 30.], egui::TextEdit::singleline(&mut draft.text));
+                if draft.focus {
+                    response.request_focus();
+                    draft.focus = false;
                 }
-                let start = anchor(c.from, true);
-                let end = anchor(to, false);
-                let bend = (end.y - start.y).abs().max(80. * scale) * 0.35;
-                let color = if c.supplementary { ORANGE } else { ACCENT };
-                painter.add(egui::epaint::CubicBezierShape::from_points_stroke(
-                    [
-                        start,
-                        start + Vec2::new(65. * scale, bend),
-                        end - Vec2::new(65. * scale, bend),
-                        end,
-                    ],
-                    false,
-                    Color32::TRANSPARENT,
-                    Stroke::new(if c.supplementary { 1. } else { 1.7_f32 }, color),
-                ));
-                if c.supplementary {
-                    painter.text(
-                        start.lerp(end, 0.5),
-                        Align2::CENTER_CENTER,
-                        "extralänk",
-                        FontId::proportional(10. * scale.max(0.7)),
-                        ORANGE,
-                    );
+                ui.horizontal(|ui| {
+                    apply = ui.button("Save name").clicked() || submit;
+                    cancel =
+                        ui.button("Cancel").clicked() || ctx.input(|i| i.key_pressed(Key::Escape));
+                });
+            });
+            if apply {
+                let node = draft.node;
+                let name = draft.text.trim().to_owned();
+                if !self.change(|project| {
+                    project
+                        .node_mut(node)
+                        .ok_or("The device no longer exists.")?
+                        .name = name;
+                    Ok(())
+                }) {
+                    self.rename_device = Some(draft);
                 }
+            } else if !cancel {
+                self.rename_device = Some(draft);
             }
         }
-        let mut choice = None;
-        let mut level = None;
-        for place in &placements {
-            let node = self.project.node(place.id).unwrap();
-            let card = node_rect(node.id);
-            if !card.intersects(rect) {
-                continue;
-            }
-            painter.rect_filled(card, 7., Color32::from_rgb(29, 39, 48));
-            painter.rect_stroke(
-                card,
-                7.,
-                Stroke::new(
-                    if self.selected == Some(node.id) {
-                        1.8
-                    } else {
-                        1_f32
-                    },
-                    if self.selected == Some(node.id) {
-                        ACCENT
-                    } else {
-                        Color32::from_rgb(61, 78, 91)
-                    },
-                ),
-                egui::StrokeKind::Inside,
-            );
-            let header = Rect::from_min_size(card.min, Vec2::new(card.width(), 54. * scale));
-            let title = painter.layout(
-                node.name.clone(),
-                FontId::proportional(16. * scale),
-                Color32::WHITE,
-                220. * scale,
-            );
-            painter.galley(
-                card.min + Vec2::new(15., 13.) * scale,
-                title,
-                Color32::WHITE,
-            );
-            painter.text(
-                card.right_top() + Vec2::new(-13., 18.) * scale,
-                Align2::RIGHT_TOP,
-                "3D >",
-                FontId::proportional(11. * scale),
-                ACCENT,
-            );
-            if ui
-                .interact(header, ui.id().with(("tree-node", node.id)), Sense::click())
-                .on_hover_text("Öppna enhetens fysiska modell")
-                .clicked()
-            {
-                level = Some(node.id);
-            }
-            for (index, port) in node.ports.iter().enumerate() {
-                let r = PortRef {
-                    node: node.id,
-                    port: port.id,
-                };
-                let connected = self.project.connection_at(r);
-                let row = Rect::from_min_size(
-                    card.min + Vec2::new(8., 61. + index as f32 * 24.) * scale,
-                    Vec2::new(274., 24.) * scale,
+        if let Some(mut editor) = self.rotate_port.take() {
+            let mut apply = false;
+            let mut cancel = false;
+            egui::Modal::new(egui::Id::new("rotate-port")).show(ctx, |ui| {
+                ui.heading("Rotate port");
+                ui.label("Angle in degrees");
+                ui.add(
+                    egui::DragValue::new(&mut editor.degrees)
+                        .speed(1.)
+                        .suffix("°"),
                 );
-                if self.selected == Some(node.id) && self.selected_port == Some(port.id) {
-                    painter.rect_filled(row, 2., Color32::from_rgb(61, 67, 58));
+                ui.horizontal(|ui| {
+                    apply = ui.button("Apply").clicked() || submit;
+                    cancel =
+                        ui.button("Cancel").clicked() || ctx.input(|i| i.key_pressed(Key::Escape));
+                });
+            });
+            if apply {
+                if !self.change(|project| project.rotate_port(editor.port, editor.degrees)) {
+                    self.rotate_port = Some(editor);
                 }
-                painter.circle_filled(
-                    row.left_center() + Vec2::new(8. * scale, 0.),
-                    3. * scale,
-                    if connected.is_some() { ACCENT } else { MUTED },
-                );
-                let text = if let Some(c) = connected {
-                    format!("{}  >  {}", port.name, self.project.target_label(c, r))
+            } else if !cancel {
+                self.rotate_port = Some(editor);
+            }
+        }
+        if let Some(mut editor) = self.connect_ports.take() {
+            let mut apply = false;
+            let mut cancel = false;
+            egui::Modal::new(egui::Id::new("connect-ports")).show(ctx, |ui| {
+                ui.set_min_width(390.);
+                ui.heading("Connect to a device");
+                if self.project.is_occupied(editor.source) {
+                    ui.label("This source port is occupied. Disconnect it first.");
+                    cancel = ui.button("Close").clicked();
                 } else {
-                    format!("{}  ·  ledig", port.name)
-                };
-                let mut job = egui::text::LayoutJob::simple(
-                    text.clone(),
-                    FontId::proportional(11. * scale),
-                    if connected.is_some() { ACCENT } else { MUTED },
-                    245. * scale,
-                );
-                job.wrap.max_rows = 1;
-                job.wrap.overflow_character = Some('…');
-                let galley = painter.layout_job(job);
-                painter.galley(row.min + Vec2::new(17., 3.) * scale, galley, Color32::WHITE);
-                if ui
-                    .interact(row, ui.id().with(("tree-port", port.id)), Sense::click())
-                    .on_hover_text(format!(
-                        "{text}\n{} · {}",
-                        port.kind.name(),
-                        port.face.name()
-                    ))
-                    .clicked()
-                {
-                    choice = Some((node.id, port.id));
+                    if let Some(port) = self.project.port(editor.source) {
+                        ui.label(format!("Source: {} · {}", port.name, port.kind.name()));
+                    }
+                    let nodes: Vec<_> = self
+                        .project
+                        .nodes
+                        .iter()
+                        .filter(|node| node.id != editor.source.node)
+                        .map(|node| (node.id, node.name.clone()))
+                        .collect();
+                    if !editor
+                        .target_node
+                        .is_some_and(|id| nodes.iter().any(|node| node.0 == id))
+                    {
+                        editor.target_node = nodes.first().map(|node| node.0);
+                        editor.target_port = None;
+                    }
+                    let before = editor.target_node;
+                    egui::ComboBox::from_id_salt("connect-target-device")
+                        .selected_text(
+                            nodes
+                                .iter()
+                                .find(|node| Some(node.0) == editor.target_node)
+                                .map(|node| node.1.as_str())
+                                .unwrap_or("Create another device first"),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, name) in &nodes {
+                                ui.selectable_value(&mut editor.target_node, Some(*id), name);
+                            }
+                        });
+                    if editor.target_node != before {
+                        editor.target_port = None;
+                    }
+                    let ports: Vec<_> = editor
+                        .target_node
+                        .and_then(|id| self.project.node(id))
+                        .map(|node| {
+                            node.ports
+                                .iter()
+                                .filter(|port| {
+                                    !self.project.is_occupied(PortRef {
+                                        node: node.id,
+                                        port: port.id,
+                                    })
+                                })
+                                .map(|port| (port.id, port.name.clone(), port.kind))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if !editor
+                        .target_port
+                        .is_some_and(|id| ports.iter().any(|port| port.0 == id))
+                    {
+                        editor.target_port = ports.first().map(|port| port.0);
+                    }
+                    egui::ComboBox::from_id_salt("connect-target-port")
+                        .selected_text(
+                            ports
+                                .iter()
+                                .find(|port| Some(port.0) == editor.target_port)
+                                .map(|port| format!("{} · {}", port.1, port.2.name()))
+                                .unwrap_or_else(|| "No free target port".into()),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (id, name, kind) in &ports {
+                                ui.selectable_value(
+                                    &mut editor.target_port,
+                                    Some(*id),
+                                    format!("{name} · {}", kind.name()),
+                                );
+                            }
+                        });
+                    ui.checkbox(&mut editor.adapter, "Adapter / converting cable");
+                    ui.checkbox(
+                        &mut editor.supplementary,
+                        "Supplementary connection outside the hierarchy",
+                    );
+                    let compatible =
+                        self.project
+                            .port(editor.source)
+                            .zip(
+                                editor.target_node.zip(editor.target_port).and_then(
+                                    |(node, port)| self.project.port(PortRef { node, port }),
+                                ),
+                            )
+                            .is_some_and(|(source, target)| {
+                                source.kind.compatible(target.kind) || editor.adapter
+                            });
+                    if editor.target_port.is_some() && !compatible {
+                        ui.label(
+                            RichText::new(
+                                "Different connector families: select Adapter to connect them.",
+                            )
+                            .color(ORANGE),
+                        );
+                    }
+                    ui.horizontal(|ui| {
+                        apply = ui
+                            .add_enabled(compatible, egui::Button::new("Connect devices"))
+                            .clicked();
+                        cancel = ui.button("Cancel").clicked();
+                    });
                 }
-            }
-        }
-        if let Some((node, port)) = choice {
-            self.select(node, Some(port));
-        }
-        if let Some(node) = level {
-            self.select(node, None);
-            self.mode = Mode::Level;
-        }
-        if response.dragged() {
-            self.tree_pan += ui.input(|i| i.pointer.delta());
-        }
-        if response.hovered() {
-            let wheel = ui.input(|i| i.smooth_scroll_delta.y);
-            if wheel != 0. {
-                let old = self.tree_zoom;
-                self.tree_zoom = (old * (wheel * 0.0025).exp()).clamp(0.15, 2.5);
-                if let Some(pos) = response.hover_pos() {
-                    let local = pos - rect.left_top();
-                    self.tree_pan = local - (local - self.tree_pan) * (self.tree_zoom / old);
+                cancel |= ctx.input(|i| i.key_pressed(Key::Escape));
+            });
+            if !cancel {
+                self.connect_ports = Some(editor);
+                if apply {
+                    self.connect_selected();
                 }
             }
         }
@@ -1659,42 +995,40 @@ impl CableApp {
                     let text = editor.text.clone();
                     if self.change(|p| p.label_port(port, &text)) {
                         self.port_label = None;
-                        self.status = "Utrustningens namn sparat som etikett vid porten.".into();
+                        self.status = "Equipment name saved beside the port.".into();
                     }
                 }
                 Some(port_label::Action::Cancel) => self.port_label = None,
-                Some(port_label::Action::GoTo(port)) => {
-                    self.port_label = None;
-                    self.select(port.node, Some(port.port));
-                    self.mode = Mode::Level;
-                }
                 None => {}
             }
         }
+        if self.error.is_none() && self.pending.is_none() && self.file_dialog.is_none() {
+            self.action_dialogs(ctx);
+        }
         if let Some(error) = self.error.clone() {
             egui::Modal::new(egui::Id::new("error")).show(ctx, |ui| {
-                ui.heading("Det gick inte att utföra ändringen");
+                ui.heading("Could not apply the change");
                 ui.label(error);
-                if ui.button("Stäng").clicked() {
+                if ui.button("Close").clicked() {
                     self.error = None;
                 }
             });
         }
         if let Some(action) = self.pending.clone() {
             egui::Modal::new(egui::Id::new("unsaved")).show(ctx, |ui| {
-                ui.heading("Spara ändringarna?");
-                ui.label("Projektet har ändringar som inte är sparade.");
+                ui.heading("Save changes?");
+                ui.label("This project has unsaved changes.");
                 ui.horizontal(|ui| {
-                    if ui.button("Spara och fortsätt").clicked() {
+                    if ui.button("Save and continue").clicked() {
                         self.pending = None;
                         self.after_save = Some(action.clone());
                         self.save(false);
                     }
-                    if ui.button("Fortsätt utan att spara").clicked() {
+                    if ui.button("Continue without saving").clicked() {
                         self.pending = None;
                         self.perform(action.clone());
                     }
-                    if ui.button("Avbryt").clicked() {
+                    if ui.button("Cancel").clicked() {
                         self.pending = None;
                     }
                 });
@@ -1703,18 +1037,14 @@ impl CableApp {
         if self.file_dialog.is_some() {
             egui::Modal::new(egui::Id::new("path-dialog")).show(ctx, |ui| {
                 let save = matches!(self.file_dialog, Some(FileDialog::Save));
-                ui.heading(if save {
-                    "Spara projekt"
-                } else {
-                    "Öppna projekt"
-                });
-                ui.label("Sökväg till projektfil (.cable.json)");
+                ui.heading(if save { "Save project" } else { "Open project" });
+                ui.label("Project file path (.cable.json)");
                 ui.add_sized(
                     [520., 30.],
                     egui::TextEdit::singleline(&mut self.file_input),
                 );
                 ui.horizontal(|ui| {
-                    if ui.button(if save { "Spara" } else { "Öppna" }).clicked() {
+                    if ui.button(if save { "Save" } else { "Open" }).clicked() {
                         let path = PathBuf::from(self.file_input.trim());
                         self.file_dialog = None;
                         if save {
@@ -1723,7 +1053,7 @@ impl CableApp {
                             self.load_path(path);
                         }
                     }
-                    if ui.button("Avbryt").clicked() {
+                    if ui.button("Cancel").clicked() {
                         self.file_dialog = None;
                         self.after_save = None;
                     }
@@ -1731,12 +1061,23 @@ impl CableApp {
             });
         }
         if self.help {
-            egui::Window::new("Så använder du Cable Management").open(&mut self.help).default_width(550.).show(ctx,|ui|{
-            ui.label("1. Skapa PC, hubb eller mixer med Ny enhet.");ui.label("2. Välj Redigera. Justera höljet och tillämpa ändringarna.");ui.label("3. Välj en sida. Dra en portikon från högerpaletten och släpp den på enheten.");ui.label("4. Dra portarna på ytan eller ange U/V och rotation i mm.");ui.label("5. Dubbelklicka porten och skriv t.ex. gamingmus. Skapa en separat enhet bara om den har portar som ska mappas.");ui.label("6. Växla mellan hela trädet och nivåvis navigering.");ui.separator();
-            ui.label("Modellen byter sida enbart med sidknapparna. Scroll zoomar och mittenknappen panorerar. Dra på en port för att flytta den. Högerklicka på en port och välj Delete för att ta bort den.");ui.label("Ctrl+S spara · Ctrl+Skift+S spara som · Ctrl+O öppna\nCtrl+N nytt · Ctrl+Z ångra · Ctrl+Y gör om");ui.separator();
-            ui.label("Porterna har fasta fysiska mått. Höljets storlek ändrar placeringen men förstorar aldrig kontakten. En adapter måste anges när kontaktfamiljerna skiljer sig.");
-            ui.label("Sparade projekt är lokal, versionerad JSON. Föregående sparning ligger i .bak. Osparade ändringar får ett separat återställningsutkast var 15:e sekund.");
-        });
+            egui::Window::new("Using Cable Management")
+                .open(&mut self.help)
+                .default_width(550.)
+                .show(ctx, |ui| {
+                    ui.label("1. Create a computer, hub or mixer with New device.");
+                    ui.label("2. Choose a side, then drag a port from the palette onto the device.");
+                    ui.label("3. Choose Edit to move ports or resize the enclosure by dragging a corner. Drag labels to keep names readable.");
+                    ui.label("4. Double-click a port to name equipment. A mapped port opens its connected device immediately.");
+                    ui.label("5. Right-click a port to rotate, connect, disconnect or delete it. Connect to an existing device and choose a free port; drag a device from the list onto a port to preselect it.");
+                    ui.label("6. Right-click a device name to rename or delete it. Right-click the canvas title to add a box or wedge.");
+                    ui.separator();
+                    ui.label("Change sides with the face buttons. Scroll to zoom; middle-drag to pan. Hover a mapped port or label to highlight its device in the list.");
+                    ui.label("Ctrl+S save · Ctrl+Shift+S save as · Ctrl+O open\nCtrl+N new · Ctrl+Z undo · Ctrl+Y redo");
+                    ui.separator();
+                    ui.label("Connectors keep their physical size when you resize the enclosure. Choose Adapter when connector families differ. Supplementary connections do not change the device hierarchy.");
+                    ui.label("Projects are local versioned JSON files. The previous save is kept as .bak. Unsaved changes receive a recovery draft every 15 seconds.");
+                });
         }
     }
 }
@@ -1756,7 +1097,10 @@ impl eframe::App for CableApp {
         let modal = self.pending.is_some()
             || self.file_dialog.is_some()
             || self.error.is_some()
-            || self.port_label.is_some();
+            || self.port_label.is_some()
+            || self.rename_device.is_some()
+            || self.rotate_port.is_some()
+            || self.connect_ports.is_some();
         if !modal {
             if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S)) {
                 self.save(true);
@@ -1778,17 +1122,14 @@ impl eframe::App for CableApp {
         }
         self.toolbar(ctx);
         self.sidebar(ctx);
-        self.inspector(ctx);
+        self.palette_panel(ctx);
         egui::CentralPanel::default()
             .frame(
                 egui::Frame::new()
                     .fill(Color32::from_rgb(20, 27, 34))
                     .inner_margin(14.),
             )
-            .show(ctx, |ui| match self.mode {
-                Mode::Level => self.level(ui),
-                Mode::Tree => self.full_tree(ui),
-            });
+            .show(ctx, |ui| self.level(ui));
         self.dialogs(ctx);
         palette::drag_indicator(ctx);
         if self.dirty() && self.last_recovery.elapsed() > Duration::from_secs(15) {
@@ -1805,10 +1146,11 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.add_space(5.);
     ui.label(RichText::new(text).size(10.).strong().color(MUTED));
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cable_management::ports::PortKind;
+    use eframe::egui::{Pos2, Rect};
     #[test]
     fn close_confirmation_keeps_unfinished_equipment_text_when_escape_is_pressed() {
         let ctx = egui::Context::default();
@@ -1823,7 +1165,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        app.port_label.as_mut().unwrap().text = "gamingmus".into();
+        app.port_label.as_mut().unwrap().text = "gaming mouse".into();
         app.begin(Pending::Quit);
         assert!(app.pending.is_some());
         interactive_frame(
@@ -1840,7 +1182,7 @@ mod tests {
         );
         assert_eq!(
             app.port_label.as_ref().map(|e| e.text.as_str()),
-            Some("gamingmus")
+            Some("gaming mouse")
         );
     }
     fn interactive_frame(
@@ -1857,7 +1199,9 @@ mod tests {
                 ..Default::default()
             },
             |ctx| {
-                app.inspector(ctx);
+                app.toolbar(ctx);
+                app.sidebar(ctx);
+                app.palette_panel(ctx);
                 egui::CentralPanel::default().show(ctx, |ui| {
                     app.level(ui);
                 });
@@ -1870,7 +1214,7 @@ mod tests {
         let ctx = egui::Context::default();
         let mut app = CableApp::from_context(&ctx, None);
         let mut p = Project::default();
-        p.add_node("Min PC", [200., 300., 200.]);
+        p.add_node("My PC", [200., 300., 200.]);
         app.reset_document(p, None, false);
         let output = interactive_frame(&ctx, &mut app, 0., vec![]);
         let start = output
@@ -1934,7 +1278,7 @@ mod tests {
             &ctx,
             &mut app,
             0.7,
-            vec![egui::Event::Text("gamingmus".into())],
+            vec![egui::Event::Text("gaming mouse".into())],
         );
         interactive_frame(
             &ctx,
@@ -1950,7 +1294,7 @@ mod tests {
         );
         assert!(app.port_label.is_none());
         assert_eq!(app.project.nodes.len(), 1);
-        assert_eq!(app.project.endpoints[0].name, "gamingmus");
+        assert_eq!(app.project.endpoints[0].name, "gaming mouse");
         app.project.validate().unwrap();
     }
     #[test]
@@ -1978,42 +1322,335 @@ mod tests {
         a
     }
     #[test]
-    fn unapplied_editor_values_are_dirty_and_save_flushes_them() {
+    fn palette_only_layout_has_no_properties_tree_or_lower_port_list() {
+        let ctx = egui::Context::default();
+        let mut a = CableApp::from_context(&ctx, None);
+        let mut project = Project::default();
+        let node = project.add_node("Desk PC", [200., 300., 200.]);
+        project
+            .add_port(node, PortKind::UsbA, "Unique port list sentinel")
+            .unwrap();
+        a.reset_document(project, None, false);
+        let output = interactive_frame(&ctx, &mut a, 0., vec![]);
+        let strings = painted_text(&output);
+        assert!(strings.iter().any(|text| text == "PORT LIBRARY · 20 TYPES"));
+        assert!(strings.iter().any(|text| text == "not connected"));
+        for removed in [
+            "PROPERTIES",
+            "PORTS",
+            "Rotation",
+            "Dimensions",
+            "Whole tree",
+            "Unique port list sentinel",
+        ] {
+            assert!(
+                !strings.iter().any(|text| text.contains(removed)),
+                "obsolete UI: {removed}"
+            );
+        }
+        let canvas = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.fill == Color32::from_rgb(18, 24, 31) => {
+                    Some(rect.rect)
+                }
+                _ => None,
+            })
+            .max_by(|a, b| a.area().total_cmp(&b.area()));
+        let canvas = canvas.expect("canvas background");
+        assert!(
+            canvas.bottom() > 800.,
+            "canvas should use the remaining height"
+        );
+    }
+
+    #[test]
+    fn double_click_event_opens_mapped_peer_immediately_in_both_directions() {
         let mut a = app();
-        let mut draft = a.project.nodes[0].clone();
-        draft.name = "Ändrat PC-namn".into();
-        a.draft = Some(draft);
+        let connection = a
+            .project
+            .connections
+            .iter()
+            .find(|connection| matches!(connection.to, Target::Port(_)))
+            .unwrap()
+            .clone();
+        let Target::Port(peer) = connection.to else {
+            unreachable!()
+        };
+        a.apply_scene_event(
+            connection.from.node,
+            scene::SceneEvent {
+                edit_label: Some(connection.from.port),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.selected, Some(peer.node));
+        assert_eq!(a.selected_port, Some(peer.port));
+        assert_eq!(a.view.face, a.project.port(peer).unwrap().face);
+        assert!(a.port_label.is_none());
+        a.apply_scene_event(
+            peer.node,
+            scene::SceneEvent {
+                edit_label: Some(peer.port),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.selected, Some(connection.from.node));
+        assert_eq!(a.selected_port, Some(connection.from.port));
+        assert!(a.port_label.is_none());
+    }
+
+    #[test]
+    fn scene_hover_updates_and_clears_sidebar_link_state() {
+        let mut a = app();
+        let node = a.project.nodes[0].id;
+        let peer = a.project.nodes[1].id;
+        a.apply_scene_event(
+            node,
+            scene::SceneEvent {
+                hovered_node: Some(peer),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.hovered_node, Some(peer));
+        a.apply_scene_event(node, scene::SceneEvent::default());
+        assert_eq!(a.hovered_node, None);
+    }
+
+    #[test]
+    fn rotate_modal_applies_absolute_angle_and_is_undoable() {
+        let ctx = egui::Context::default();
+        let mut a = app();
+        let node = a.project.nodes[0].id;
+        let port = a.project.nodes[0].ports[0].id;
+        let reference = PortRef { node, port };
+        let before = a.project.clone();
+        a.apply_scene_event(
+            node,
+            scene::SceneEvent {
+                rotate: Some(port),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            a.rotate_port.as_ref().unwrap().degrees,
+            a.project.port(reference).unwrap().angle
+        );
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
+        let angle = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text.ends_with('°') => {
+                    Some(text.pos + text.galley.size() / 2.)
+                }
+                _ => None,
+            })
+            .expect("numeric angle field");
+        interactive_frame(&ctx, &mut a, 0.2, vec![egui::Event::PointerMoved(angle)]);
+        interactive_frame(&ctx, &mut a, 0.3, vec![pointer_button(angle, true)]);
+        interactive_frame(&ctx, &mut a, 0.4, vec![pointer_button(angle, false)]);
+        interactive_frame(&ctx, &mut a, 0.5, vec![]);
+        interactive_frame(
+            &ctx,
+            &mut a,
+            0.6,
+            vec![egui::Event::Text("405".into()), key(Key::Enter)],
+        );
+        assert!(a.rotate_port.is_none());
+        assert_eq!(a.project.port(reference).unwrap().angle, 45.);
+        a.history(false);
+        assert_eq!(a.project, before);
+    }
+
+    fn free_devices() -> (CableApp, PortRef, PortRef) {
+        let mut project = Project::default();
+        let source_node = project.add_node("PC", [200., 300., 200.]);
+        let source_port = project
+            .add_port(source_node, PortKind::UsbA, "USB-A 1")
+            .unwrap();
+        let target_node = project.add_node("Hub", [100., 40., 60.]);
+        let occupied = project
+            .add_port(target_node, PortKind::UsbA, "Occupied")
+            .unwrap();
+        let target_port = project
+            .add_port(target_node, PortKind::Hdmi, "Free HDMI")
+            .unwrap();
+        project
+            .connect_endpoint(
+                PortRef {
+                    node: target_node,
+                    port: occupied,
+                },
+                "Mouse",
+            )
+            .unwrap();
+        let mut a = CableApp::from_context(&egui::Context::default(), None);
+        a.reset_document(project, None, false);
+        (
+            a,
+            PortRef {
+                node: source_node,
+                port: source_port,
+            },
+            PortRef {
+                node: target_node,
+                port: target_port,
+            },
+        )
+    }
+
+    #[test]
+    fn device_drop_connect_modal_uses_existing_device_and_only_free_ports() {
+        let ctx = egui::Context::default();
+        let (mut a, source, target) = free_devices();
+        a.apply_scene_event(
+            source.node,
+            scene::SceneEvent {
+                node_dropped: Some((source.port, target.node)),
+                ..Default::default()
+            },
+        );
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
+        let editor = a.connect_ports.as_mut().unwrap();
+        assert_eq!(editor.target_node, Some(target.node));
+        assert_eq!(editor.target_port, Some(target.port));
+        assert!(
+            painted_text(&output)
+                .iter()
+                .any(|text| text.contains("Different connector families"))
+        );
+        editor.adapter = true;
+        assert!(a.connect_selected());
+        assert!(a.connect_ports.is_none());
+        assert_eq!(a.project.nodes.len(), 2);
+        assert_eq!(a.project.connected_peer(source), Some(target));
+        assert!(a.project.connection_at(source).unwrap().adapter);
+        a.project.validate().unwrap();
+        a.history(false);
+        assert_eq!(a.project.connected_peer(source), None);
+    }
+
+    #[test]
+    fn occupied_source_connect_modal_requires_disconnect_without_mutation() {
+        let ctx = egui::Context::default();
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let before = a.project.clone();
+        a.apply_scene_event(
+            source.node,
+            scene::SceneEvent {
+                connect: Some(source.port),
+                ..Default::default()
+            },
+        );
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
+        assert!(
+            painted_text(&output)
+                .iter()
+                .any(|text| text.contains("Disconnect it first"))
+        );
+        assert_eq!(a.project, before);
+        assert!(a.undo.is_empty());
+    }
+
+    #[test]
+    fn label_and_resize_gestures_each_have_one_undo_and_persist_on_save() {
+        let (mut a, reference, _) = free_devices();
+        let original = a.project.clone();
+        let part = a.project.node(reference.node).unwrap().parts[0].id;
+        a.apply_scene_event(
+            reference.node,
+            scene::SceneEvent {
+                drag_started: true,
+                label_moved: Some((reference.port, [12., 18.])),
+                ..Default::default()
+            },
+        );
+        a.apply_scene_event(
+            reference.node,
+            scene::SceneEvent {
+                label_moved: Some((reference.port, [24., 36.])),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.undo.len(), 1);
+        assert_eq!(
+            a.project.port(reference).unwrap().uv,
+            original.port(reference).unwrap().uv
+        );
+        let labeled = a.project.clone();
+        a.apply_scene_event(
+            reference.node,
+            scene::SceneEvent {
+                drag_started: true,
+                resized: Some((part, [250., 340., 200.], [25., 20., 0.])),
+                ..Default::default()
+            },
+        );
+        a.apply_scene_event(
+            reference.node,
+            scene::SceneEvent {
+                resized: Some((part, [270., 360., 200.], [35., 30., 0.])),
+                ..Default::default()
+            },
+        );
+        assert_eq!(a.undo.len(), 2);
+        let file =
+            std::env::temp_dir().join(format!("cable-ui-gestures-{}.json", std::process::id()));
+        a.path = Some(file.clone());
+        a.save(false);
+        assert!(!a.dirty());
+        let saved = storage::load(&file).unwrap();
+        assert_eq!(
+            saved.port(reference).unwrap().label_offset,
+            Some([24., 36.])
+        );
+        assert_eq!(
+            saved.node(reference.node).unwrap().parts[0].size,
+            [270., 360., 200.]
+        );
+        a.history(false);
+        assert_eq!(a.project, labeled);
+        a.history(false);
+        assert_eq!(a.project, original);
+        a.history(true);
+        a.history(true);
+        assert_eq!(a.project, saved);
+        cleanup(&file);
+    }
+
+    #[test]
+    fn rename_text_is_dirty_saved_and_kept_when_invalid() {
+        let mut a = app();
+        let node = a.project.nodes[0].id;
+        a.start_rename(node);
+        a.rename_device.as_mut().unwrap().text = "Renamed PC".into();
         assert!(a.dirty());
-        let file = std::env::temp_dir().join(format!("cable-ui-{}.json", std::process::id()));
+        let file =
+            std::env::temp_dir().join(format!("cable-ui-rename-{}.json", std::process::id()));
         a.path = Some(file.clone());
         a.save(false);
         assert_eq!(
-            storage::load(&file).unwrap().nodes[0].name,
-            "Ändrat PC-namn"
+            storage::load(&file).unwrap().node(node).unwrap().name,
+            "Renamed PC"
         );
         assert!(!a.dirty());
-        let _ = std::fs::remove_file(&file);
-        let _ = std::fs::remove_file(storage::backup_path(&file));
-    }
-    #[test]
-    fn switching_nodes_preserves_valid_edits_and_blocks_invalid_edits() {
-        let mut a = app();
-        let first = a.project.nodes[0].id;
-        let second = a.project.nodes[1].id;
-        let mut draft = a.project.nodes[0].clone();
-        draft.name = "Min dator".into();
-        a.draft = Some(draft);
-        a.select(second, None);
-        assert_eq!(a.project.node(first).unwrap().name, "Min dator");
-        assert_eq!(a.selected, Some(second));
-        let mut invalid = a.project.node(second).unwrap().clone();
-        invalid.name.clear();
-        a.draft = Some(invalid);
-        a.select(first, None);
-        assert_eq!(a.selected, Some(second));
+        a.start_rename(node);
+        a.rename_device.as_mut().unwrap().text.clear();
+        assert!(!a.flush_draft());
         assert!(a.error.is_some());
-        assert!(a.draft.is_some());
+        assert!(a.rename_device.is_some());
+        assert_eq!(a.project.node(node).unwrap().name, "Renamed PC");
+        cleanup(&file);
     }
+
     #[test]
     fn invalid_load_preserves_current_document() {
         let mut a = app();
@@ -2022,32 +1659,70 @@ mod tests {
         assert_eq!(a.project, before);
         assert!(a.error.is_some());
     }
+
     #[test]
-    fn adding_a_node_retains_pending_editor_changes() {
-        let mut a = app();
-        let first = a.project.nodes[0].id;
-        let mut draft = a.project.nodes[0].clone();
-        draft.name = "Bevarat namn".into();
-        a.draft = Some(draft);
-        a.add_node("Mixer", [200., 80., 150.]);
-        assert_eq!(a.project.node(first).unwrap().name, "Bevarat namn");
+    fn undo_ends_an_active_resize_even_while_pointer_is_held() {
+        let ctx = egui::Context::default();
+        let mut a = CableApp::from_context(&ctx, None);
+        let mut p = Project::default();
+        p.add_node("PC", [200., 300., 200.]);
+        a.reset_document(p, None, false);
+        a.editing = true;
+        let original = a.project.clone();
+        let out = interactive_frame(&ctx, &mut a, 0., vec![]);
+        let bounds = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Path(path) if path.fill == Color32::from_rgb(74, 82, 91) => {
+                    Some(Rect::from_points(&path.points))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let start = bounds.right_center();
+        let end = start + Vec2::new(40., 0.);
+        interactive_frame(&ctx, &mut a, 0.1, vec![egui::Event::PointerMoved(start)]);
+        interactive_frame(&ctx, &mut a, 0.2, vec![pointer_button(start, true)]);
+        interactive_frame(&ctx, &mut a, 0.3, vec![egui::Event::PointerMoved(end)]);
+        assert_ne!(a.project, original);
+        assert_eq!(a.undo.len(), 1);
+        a.history(false);
+        assert_eq!(a.project, original);
+        interactive_frame(&ctx, &mut a, 0.4, vec![]);
+        assert_eq!(a.project, original);
+        assert!(a.undo.is_empty());
+        assert_eq!(a.redo.len(), 1);
     }
-    #[test]
-    fn endpoint_and_cable_text_buffers_are_saved() {
-        let mut a = app();
-        let endpoint = a.project.endpoints[0].id;
-        let cable = a.project.connections[0].id;
-        a.endpoint_drafts
-            .insert(endpoint, "Kamera ovanför skärmen".into());
-        a.cable_drafts.insert(cable, "Blå kabel".into());
-        let file =
-            std::env::temp_dir().join(format!("cable-ui-labels-{}.json", std::process::id()));
-        a.path = Some(file.clone());
-        a.save(false);
-        let p = storage::load(&file).unwrap();
-        assert_eq!(p.endpoint(endpoint).unwrap().name, "Kamera ovanför skärmen");
-        assert_eq!(p.connections[0].label, "Blå kabel");
-        let _ = std::fs::remove_file(&file);
-        let _ = std::fs::remove_file(storage::backup_path(&file));
+    fn painted_text(output: &egui::FullOutput) -> Vec<String> {
+        output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) => Some(text.galley.job.text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+    fn pointer_button(pos: Pos2, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        }
+    }
+    fn key(key: Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+    fn cleanup(file: &std::path::Path) {
+        let _ = std::fs::remove_file(file);
+        let _ = std::fs::remove_file(storage::backup_path(file));
     }
 }

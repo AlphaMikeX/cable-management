@@ -1,5 +1,14 @@
 # Changes
 
+## 0.3.0 — 2026-10-15
+
+- Canvas-only editing: removed properties inspector, bottom port list and tree view. Right panel contains only the full-height draggable port library. Entire interface is English.
+- Drag enclosure edges and corners in Edit mode to resize the current view dimensions. A frozen projection keeps the opposite edge fixed throughout the gesture. Physical ports and cables retain their identities and dimensions.
+- Right-click a port to set its rotation in degrees, connect it to another mapped device, disconnect it or delete it. Devices can also be dragged from the left list onto a port to start a connection.
+- Labels show only the connected equipment/device name or `not connected`. Drag labels independently; leader lines remain anchored to the port and positions persist in the project.
+- Double-click a mapped port to open the connected device immediately. Hover a linked port or label to highlight its peer in the left list. Both directions are supported.
+- Existing version-1 files remain compatible through an optional per-port label offset. Source and documentation stay in GitHub; the delivery folder contains only the executable.
+
 ## 0.2.0 — 2026-10-15
 
 - A right-side palette provides icons for every connector type. Drag an icon onto the visible physical device surface to place a correctly scaled port. A preview highlights the supporting face. The palette scrolls through all 20 types and activates editing/level mode when a drag starts.

@@ -5,22 +5,22 @@ use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stro
 /// All connector types are actual drag sources, with recognizable vector icons.
 pub fn show(ui: &mut egui::Ui, enabled: bool) -> bool {
     ui.label(
-        egui::RichText::new("PORTBIBLIOTEK · 20 PORTTYPER")
+        egui::RichText::new("PORT LIBRARY · 20 TYPES")
             .size(10.)
             .strong()
             .color(ACCENT),
     );
     ui.label(
         egui::RichText::new(if enabled {
-            "Släpp på den sida du tittar på."
+            "Drag a port onto the visible device surface."
         } else {
-            "Skapa eller välj en enhet vars portar ska mappas."
+            "Create or select a device to map its ports."
         })
         .size(11.)
         .color(MUTED),
     );
     let mut started = false;
-    let height = (ui.available_height() * 0.36).clamp(150., 280.);
+    let height = ui.available_height();
     egui::ScrollArea::vertical().id_salt("port-palette-scroll").scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).max_height(height).show(ui,|ui|{
         ui.add_enabled_ui(enabled,|ui|{
             let width=(ui.available_width()-ui.spacing().item_spacing.x)/2.;
@@ -37,7 +37,7 @@ pub fn show(ui: &mut egui::Ui, enabled: bool) -> bool {
                             let text=ui.painter().layout(kind.name().into(),FontId::proportional(11.),color,(width-61.).max(35.));
                             ui.painter().galley(Pos2::new(rect.left()+56.,rect.center().y-text.size().y/2.),text,color);
                             let [w,h]=kind.dimensions();
-                            response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(format!("Dra {} till enhetens synliga yta.\nKontaktöppning: {w} × {h} mm",kind.name()));
+                            response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(format!("Drag {} onto the visible device surface.\nSocket opening: {w} × {h} mm",kind.name()));
                         });
                     }
                 });
@@ -132,7 +132,7 @@ pub fn drag_indicator(ctx: &egui::Context) {
         painter.text(
             rect.left_top() - Vec2::new(0., 4.),
             Align2::LEFT_BOTTOM,
-            "Släpp på enheten",
+            "Drop onto the device",
             FontId::proportional(10.),
             MUTED,
         );
