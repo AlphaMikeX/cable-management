@@ -1,31 +1,34 @@
-# v0.1.0 release verification — 2026-10-15
+# v0.2.0 release verification — 2026-10-15
 
-Code commit: `2fb728f` on `codex/cable-management-v0-1`.
+Code commit: `031cfac` on `codex/cable-management-v0-1`.
 
 ## Automated checks
 
 - `cargo fmt -- --check`: passed.
 - `cargo clippy --all-targets --locked -- -D warnings`: passed.
-- `cargo test --locked`: 25 tests passed (7 native application/rendering, 7 geometry/layout, 7 model integrity, 4 storage).
+- `cargo test --locked`: **41 tests passed** (16 native application/rendering, 7 geometry/layout, 7 model, 7 port interactions, 4 storage).
 - `cargo build --release --locked --target x86_64-pc-windows-gnu`: passed.
-- [Native Windows CI](https://github.com/AlphaMikeX/cable-management/actions/runs/38648706474): all steps passed, including formatting, linting, tests, MSVC release compilation and the executable's persistence self-test. The latter executes on the Windows runner and verifies project roundtrip, endpoint route and safe file replacement with backup.
+- Native executable diagnostic on Linux: passed, including port placement, text labels, graph integrity and save/open replacement with backup.
+- [Windows CI for this code](https://github.com/AlphaMikeX/cable-management/actions/runs/38659738547): passed: formatting, lint, all 41 tests, MSVC release compilation, native Windows persistence/label diagnostic and artifact upload.
 
-An independent review identified oblique port draw ordering, preservation of pending form values, persistent endpoint/cable text buffers and sloping-side port fit. Each important finding received a regression test that failed before the correction and passed afterward. A further regression verifies that explicitly selected overlapping sockets retain their identity during drag.
+The interactive tests exercise a real egui palette drag onto the device, double-click text editing with keyboard entry, the right-click Delete menu, removal and undo, and primary/secondary mouse drags preserving the fixed camera orientation. All six named side projections are covered. Text labels roundtrip without creating equipment nodes; cables to mapped hubs cannot be replaced accidentally.
+
+Independent review found two issues: a selected neighbouring socket could win over a precise click, and a clamped drop could move behind another building block. Both received failing-then-passing regressions. The reviewer's actual context-menu reproduction now deletes the clicked socket, not its selected neighbour. An additional regression preserves unfinished equipment text while a close confirmation is open.
 
 ## Interactive checks
 
-The native GUI ran under X11 with software OpenGL. Checked welcome/example loading, direct node navigation, the PC → hub → webcam chain, animated front/back views, full-tree display, editing mode, creation of a new PC with two individually placed HDMI ports, native port-library selection, mouse placement, save and reopening. Windows persistence was additionally executed by the CI runner; interactive GUI checks were on Linux rather than a physical Windows desktop.
+The native GUI ran under X11/OpenGL. A port icon was dragged from the right palette onto the existing PC, double-click opened the equipment dialog, and **gamingmus** was saved as an endpoint label with no extra node. Right-click Delete removed a port and Undo restored it. Existing version-1 projects opened without conversion. Palette icons, named sides, scrolling, text dialog and menu were visually inspected. Interactive desktop checks used Linux; the CI runner separately executes native Windows tests and the persistence diagnostic.
 
 ## Delivered executable
 
-`CableManagement.exe`, Windows x86_64 GNU release, 4,855,808 bytes. PE imports contain only Windows system DLLs; no MinGW runtime DLLs or other adjacent files are required.
+`CableManagement.exe`, Windows x86_64 GNU release, **4,896,768 bytes**. PE imports contain only Windows system DLLs, with no adjacent MinGW or other runtime files required.
 
 SHA-256:
 
 ```text
-a4126d122abd8bd25b62553ddd610a885663ffc47ebacc28d200f13474dc5301
+55b166593d4e02005e0e812ef7afd932a258b8bc774a1b64d967ed0e141abbec
 ```
 
-The uploaded file was downloaded from Google Drive and compared byte for byte with this artifact. The delivery folder contains only the executable. The development prompt originally in that folder was preserved by moving it to the parent AI Output folder.
+The file replaced the previous executable in the same Google Drive file and folder. A fresh download compared byte for byte equal to this build. The delivery folder contains only the executable; source, tests and documentation remain in GitHub.
 
-The delivered GNU executable and the Windows-tested MSVC executable are builds of the same Rust code; they are different binaries. The CI workflow and complete source are in this repository. The GUI remains schematic box/wedge modeling as described in the product brief, without full CAD or automatic hardware inventory.
+The delivered GNU executable and the MSVC executable built by Windows CI come from the same Rust code, but are different binaries. This release retains the documented schematic box/wedge modeling limits. Model rotation is now limited to named side selection with animated transitions; free mouse orbit is removed.
