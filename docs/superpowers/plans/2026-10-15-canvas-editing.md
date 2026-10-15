@@ -62,6 +62,6 @@ Files: Cargo.toml, Cargo.lock, README.md, docs/CHANGELOG.md, docs/FORMAT.md, doc
 
 - [x] Run format, clippy, full tests and visual native interaction checks.
 - [x] Obtain independent code review and fix important findings with regression tests.
-- [ ] Cross-compile static Windows executable, push source and confirm Windows CI self-test.
-- [ ] Replace existing Drive executable, download it and compare bytes; verify folder contents.
-- [ ] Record final checks and artifact identity in repository.
+- [x] Cross-compile static Windows executable, push source and confirm Windows CI self-test.
+- [x] Replace existing Drive executable, download it and compare bytes; verify folder contents.
+- [x] Record final checks and artifact identity in repository.
