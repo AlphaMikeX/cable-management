@@ -8,10 +8,10 @@ Run `CableManagement.exe`. No adjacent runtime files or Rust installation are ne
 
 1. Create a port-bearing device with **New device** in the left sidebar. Create separate devices only when their ports need mapping, for example a computer, hub or mixer.
 2. Select **Edit** and a named side: **Front**, **Back**, **Left**, **Right**, **Top** or **Bottom**. Drag the device's edges or corner handles to resize the dimensions visible from that side. The hidden dimension and connector sizes stay unchanged.
-3. Drag any of the 20 connector icons from the right palette onto the visible device surface. Drag a placed port to reposition it on that surface.
+3. Use **Rotate 90° clockwise** above the port palette to pre-rotate every library icon. Click again for another quarter turn; four clicks restore the original orientation. Drag any of the 20 connector icons onto the visible device surface. The preview and placed port use the selected angle; existing ports are unaffected. Drag a placed port to reposition it on that surface.
 4. Double-click a port to name terminal equipment, such as **gaming mouse**. No extra device is created. Labels show only the attached equipment or connected device name; empty ports show **not connected**.
 5. Drag labels anywhere on the canvas. A leader line follows the physical port, and the layout is saved with the project.
-6. Right-click a port or label for **Rotate…**, **Connect to device…**, **Disconnect** or **Delete**. Rotation sets an absolute angle in degrees. To connect mapped devices, choose the other device and an available physical port. Dragging a device from the left list onto a port preselects that device in the connection dialog.
+6. Right-click a port or label for **Rotate…**, **Connection…**, **Disconnect** or **Delete**. Rotation sets an absolute angle in degrees. The single **Connection…** dialog offers **Equipment name** for a mouse or other terminal equipment, or **Mapped device** for an existing device and one of its available physical ports. It loads the current connection for editing. Saving replaces that port's connection atomically; cancelling preserves it. Dragging a device from the left list onto a port preselects that device in the connection dialog.
 7. Double-click a port connected to a mapped device to open that device immediately. Hover a linked port or its label to highlight the peer in the left list. Navigation works from either end of a cable.
 8. Save as `.cable.json`. Reopening restores models, ports, connections, rotations and label positions. **Ctrl+Z** restores a deleted port and its connection or reverses an entire drag gesture.
 
@@ -28,7 +28,8 @@ The right panel contains only the port palette. There is no properties inspector
 | Drag an edge or corner in Edit | Resize the device in the current side view |
 | Drag a label | Move its annotation, keeping the leader attached |
 | Double-click a port or label | Name equipment, or navigate to a connected device |
-| Right-click a port or label | Edit/open, rotate, connect, disconnect, delete |
+| Rotate 90° clockwise above the palette | Pre-rotate library icons and future port drops |
+| Right-click a port or label | Connection…, rotate, disconnect, delete |
 | Drag a device from the left list onto a port | Connect to that device |
 | Middle-button drag | Pan |
 | Wheel | Zoom |

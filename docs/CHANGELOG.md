@@ -1,5 +1,12 @@
 # Changes
 
+## 0.4.0 — 2026-10-16
+
+- Added **Rotate 90° clockwise** above all library port types. Each click turns every icon and the next drop by another quarter turn. Drag previews and placements use the selected angle, including fit checks on narrow faces. Already placed ports stay unchanged.
+- Replaced the separate equipment/edit and mapped-device context actions with one **Connection…** editor. Choose an equipment name or an existing mapped device and target port in the same dialog. Existing connections are loaded and can be replaced atomically, with undo.
+- Unchanged mapped connections retain IDs and direction. Editing flags from the receiving port preserves the cable and its label. Invalid targets or incomplete drafts preserve both the existing connection and the draft. Double-click navigation to linked nodes remains available.
+
+
 ## 0.3.1 — 2026-10-15
 
 - Drag an empty enclosure surface to turn to an adjacent fixed side. Horizontal and vertical swipes work from all six views, in View and Edit. Each mouse press triggers at most one animated turn after a 35-pixel threshold. The camera always finishes at a named side; there is no free rotation.

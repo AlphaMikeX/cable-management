@@ -33,13 +33,6 @@ struct RotatePort {
     port: PortRef,
     degrees: f32,
 }
-struct ConnectPorts {
-    source: PortRef,
-    target_node: Option<Id>,
-    target_port: Option<Id>,
-    supplementary: bool,
-    adapter: bool,
-}
 
 pub struct CableApp {
     project: Project,
@@ -65,7 +58,6 @@ pub struct CableApp {
     port_label: Option<PortLabel>,
     rename_device: Option<RenameDevice>,
     rotate_port: Option<RotatePort>,
-    connect_ports: Option<ConnectPorts>,
 }
 
 impl CableApp {
@@ -126,7 +118,6 @@ impl CableApp {
             port_label: None,
             rename_device: None,
             rotate_port: None,
-            connect_ports: None,
         }
     }
     fn dirty(&self) -> bool {
@@ -142,7 +133,7 @@ impl CableApp {
                     .is_some_and(|n| n.name != draft.text.trim())
             })
     }
-    fn with_drafts(&self) -> Project {
+    fn with_drafts(&self) -> Result<Project, String> {
         let mut project = self.project.clone();
         if let Some(draft) = &self.rename_device
             && let Some(node) = project.node_mut(draft.node)
@@ -152,9 +143,10 @@ impl CableApp {
         if let Some(editor) = &self.port_label
             && editor.has_changes(&project)
         {
-            let _ = project.label_port(editor.port, &editor.text);
+            editor.apply(&mut project)?;
         }
-        project
+        project.validate()?;
+        Ok(project)
     }
     fn flush_draft(&mut self) -> bool {
         !self.has_drafts() || self.change(|_| Ok(()))
@@ -167,9 +159,13 @@ impl CableApp {
         self.redo.clear();
     }
     fn change(&mut self, operation: impl FnOnce(&mut Project) -> Result<(), String>) -> bool {
-        let mut p = self.with_drafts();
-        match operation(&mut p).and_then(|_| p.validate()) {
-            Ok(()) => {
+        let candidate = self.with_drafts().and_then(|mut project| {
+            operation(&mut project)?;
+            project.validate()?;
+            Ok(project)
+        });
+        match candidate {
+            Ok(p) => {
                 if p != self.project {
                     self.remember();
                     self.project = p;
@@ -210,7 +206,6 @@ impl CableApp {
         self.port_label = None;
         self.rename_device = None;
         self.rotate_port = None;
-        self.connect_ports = None;
         self.hovered_node = None;
         self.selected = self.project.roots.first().copied();
         self.selected_port = None;
@@ -362,7 +357,6 @@ impl CableApp {
             self.port_label = None;
             self.rename_device = None;
             self.rotate_port = None;
-            self.connect_ports = None;
             self.hovered_node = None;
             if !self
                 .selected
@@ -574,39 +568,23 @@ impl CableApp {
     }
 
     fn open_connect(&mut self, source: PortRef, target_node: Option<Id>) {
-        if self.flush_draft() && self.project.port(source).is_some() {
-            self.connect_ports = Some(ConnectPorts {
-                source,
-                target_node: target_node.filter(|id| *id != source.node),
-                target_port: None,
-                supplementary: false,
-                adapter: false,
-            });
+        if self.flush_draft() {
+            self.port_label = PortLabel::new(&self.project, source);
+            if let Some(node) = target_node
+                && let Some(editor) = self.port_label.as_mut()
+            {
+                editor.preselect_device(&self.project, node);
+            }
         }
     }
 
-    fn connect_selected(&mut self) -> bool {
-        let Some(dialog) = &self.connect_ports else {
+    fn save_connection(&mut self) -> bool {
+        if self.port_label.is_none() {
             return false;
-        };
-        let (Some(node), Some(port)) = (dialog.target_node, dialog.target_port) else {
-            return false;
-        };
-        let (source, supplementary, adapter) =
-            (dialog.source, dialog.supplementary, dialog.adapter);
-        if self.change(|project| {
-            project
-                .connect(
-                    source,
-                    Target::Port(PortRef { node, port }),
-                    supplementary,
-                    adapter,
-                )
-                .map(|_| ())
-        }) {
-            self.connect_ports = None;
-            self.status =
-                "Devices connected. Double-click either port to open the other device.".into();
+        }
+        if self.change(|_| Ok(())) {
+            self.port_label = None;
+            self.status = "Connection saved. Double-click a mapped port to open its device.".into();
             true
         } else {
             false
@@ -622,8 +600,9 @@ impl CableApp {
             self.remember();
         }
         // A gesture has one undo snapshot; its frames update only valid candidates.
-        if event.moved.is_some() || event.label_moved.is_some() || event.resized.is_some() {
-            let mut candidate = self.with_drafts();
+        if (event.moved.is_some() || event.label_moved.is_some() || event.resized.is_some())
+            && let Ok(mut candidate) = self.with_drafts()
+        {
             if let Some((port, uv)) = event.moved
                 && let Some(port) = candidate.port_mut(PortRef { node, port })
             {
@@ -645,12 +624,13 @@ impl CableApp {
         if let Some(drop) = event.dropped {
             let mut id = 0;
             if self.change(|project| {
-                id = project.place_port(
+                id = project.place_port_rotated(
                     node,
                     drop.kind,
                     drop.hit.part,
                     drop.hit.face,
                     drop.hit.uv,
+                    drop.angle,
                 )?;
                 Ok(())
             }) {
@@ -857,129 +837,6 @@ impl CableApp {
                 self.rotate_port = Some(editor);
             }
         }
-        if let Some(mut editor) = self.connect_ports.take() {
-            let mut apply = false;
-            let mut cancel = false;
-            egui::Modal::new(egui::Id::new("connect-ports")).show(ctx, |ui| {
-                ui.set_min_width(390.);
-                ui.heading("Connect to a device");
-                if self.project.is_occupied(editor.source) {
-                    ui.label("This source port is occupied. Disconnect it first.");
-                    cancel = ui.button("Close").clicked();
-                } else {
-                    if let Some(port) = self.project.port(editor.source) {
-                        ui.label(format!("Source: {} · {}", port.name, port.kind.name()));
-                    }
-                    let nodes: Vec<_> = self
-                        .project
-                        .nodes
-                        .iter()
-                        .filter(|node| node.id != editor.source.node)
-                        .map(|node| (node.id, node.name.clone()))
-                        .collect();
-                    if !editor
-                        .target_node
-                        .is_some_and(|id| nodes.iter().any(|node| node.0 == id))
-                    {
-                        editor.target_node = nodes.first().map(|node| node.0);
-                        editor.target_port = None;
-                    }
-                    let before = editor.target_node;
-                    egui::ComboBox::from_id_salt("connect-target-device")
-                        .selected_text(
-                            nodes
-                                .iter()
-                                .find(|node| Some(node.0) == editor.target_node)
-                                .map(|node| node.1.as_str())
-                                .unwrap_or("Create another device first"),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (id, name) in &nodes {
-                                ui.selectable_value(&mut editor.target_node, Some(*id), name);
-                            }
-                        });
-                    if editor.target_node != before {
-                        editor.target_port = None;
-                    }
-                    let ports: Vec<_> = editor
-                        .target_node
-                        .and_then(|id| self.project.node(id))
-                        .map(|node| {
-                            node.ports
-                                .iter()
-                                .filter(|port| {
-                                    !self.project.is_occupied(PortRef {
-                                        node: node.id,
-                                        port: port.id,
-                                    })
-                                })
-                                .map(|port| (port.id, port.name.clone(), port.kind))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if !editor
-                        .target_port
-                        .is_some_and(|id| ports.iter().any(|port| port.0 == id))
-                    {
-                        editor.target_port = ports.first().map(|port| port.0);
-                    }
-                    egui::ComboBox::from_id_salt("connect-target-port")
-                        .selected_text(
-                            ports
-                                .iter()
-                                .find(|port| Some(port.0) == editor.target_port)
-                                .map(|port| format!("{} · {}", port.1, port.2.name()))
-                                .unwrap_or_else(|| "No free target port".into()),
-                        )
-                        .show_ui(ui, |ui| {
-                            for (id, name, kind) in &ports {
-                                ui.selectable_value(
-                                    &mut editor.target_port,
-                                    Some(*id),
-                                    format!("{name} · {}", kind.name()),
-                                );
-                            }
-                        });
-                    ui.checkbox(&mut editor.adapter, "Adapter / converting cable");
-                    ui.checkbox(
-                        &mut editor.supplementary,
-                        "Supplementary connection outside the hierarchy",
-                    );
-                    let compatible =
-                        self.project
-                            .port(editor.source)
-                            .zip(
-                                editor.target_node.zip(editor.target_port).and_then(
-                                    |(node, port)| self.project.port(PortRef { node, port }),
-                                ),
-                            )
-                            .is_some_and(|(source, target)| {
-                                source.kind.compatible(target.kind) || editor.adapter
-                            });
-                    if editor.target_port.is_some() && !compatible {
-                        ui.label(
-                            RichText::new(
-                                "Different connector families: select Adapter to connect them.",
-                            )
-                            .color(ORANGE),
-                        );
-                    }
-                    ui.horizontal(|ui| {
-                        apply = ui
-                            .add_enabled(compatible, egui::Button::new("Connect devices"))
-                            .clicked();
-                        cancel = ui.button("Cancel").clicked();
-                    });
-                }
-                cancel |= ctx.input(|i| i.key_pressed(Key::Escape));
-            });
-            if !cancel {
-                self.connect_ports = Some(editor);
-                if apply {
-                    self.connect_selected();
-                }
-            }
-        }
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
@@ -990,16 +847,14 @@ impl CableApp {
                 .and_then(|editor| editor.show(ctx, &self.project));
             match action {
                 Some(port_label::Action::Save) => {
-                    let editor = self.port_label.as_ref().unwrap();
-                    let port = editor.port;
-                    let text = editor.text.clone();
-                    if self.change(|p| p.label_port(port, &text)) {
-                        self.port_label = None;
-                        self.status = "Equipment name saved beside the port.".into();
-                    }
+                    self.save_connection();
                 }
                 Some(port_label::Action::Cancel) => self.port_label = None,
-                None => {}
+                Some(port_label::Action::Open(peer)) if !self.has_drafts() => {
+                    self.port_label = None;
+                    self.select(peer.node, Some(peer.port));
+                }
+                Some(port_label::Action::Open(_)) | None => {}
             }
         }
         if self.error.is_none() && self.pending.is_none() && self.file_dialog.is_none() {
@@ -1069,7 +924,7 @@ impl CableApp {
                     ui.label("2. Choose a side, then drag a port from the palette onto the device.");
                     ui.label("3. Choose Edit to move ports or resize the enclosure by dragging a corner. Drag labels to keep names readable.");
                     ui.label("4. Double-click a port to name equipment. A mapped port opens its connected device immediately.");
-                    ui.label("5. Right-click a port to rotate, connect, disconnect or delete it. Connect to an existing device and choose a free port; drag a device from the list onto a port to preselect it.");
+                    ui.label("5. Right-click a port and choose Connection… for an equipment name or mapped device. Choose a free port on a mapped device; drag a device from the list onto a port to preselect it.");
                     ui.label("6. Right-click a device name to rename or delete it. Right-click the canvas title to add a box or wedge.");
                     ui.separator();
                     ui.label("Change sides with the face buttons or drag an empty area of the device. Each swipe turns to one fixed side; there is no free rotation. Scroll to zoom; middle-drag to pan. Hover a mapped port or label to highlight its device in the list.");
@@ -1099,8 +954,7 @@ impl eframe::App for CableApp {
             || self.error.is_some()
             || self.port_label.is_some()
             || self.rename_device.is_some()
-            || self.rotate_port.is_some()
-            || self.connect_ports.is_some();
+            || self.rotate_port.is_some();
         if !modal {
             if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::S)) {
                 self.save(true);
@@ -1133,8 +987,12 @@ impl eframe::App for CableApp {
         self.dialogs(ctx);
         palette::drag_indicator(ctx);
         if self.dirty() && self.last_recovery.elapsed() > Duration::from_secs(15) {
-            if let Err(e) = storage::save_recovery(&self.with_drafts()) {
-                self.status = e;
+            match self
+                .with_drafts()
+                .and_then(|project| storage::save_recovery(&project))
+            {
+                Ok(()) => {}
+                Err(e) => self.status = e,
             }
             self.last_recovery = Instant::now();
         }
@@ -1296,6 +1154,72 @@ mod tests {
         assert_eq!(app.project.nodes.len(), 1);
         assert_eq!(app.project.endpoints[0].name, "gaming mouse");
         app.project.validate().unwrap();
+    }
+    #[test]
+    fn library_rotation_changes_only_future_drops_and_places_a_vertical_port() {
+        let ctx = egui::Context::default();
+        let mut app = CableApp::from_context(&ctx, None);
+        let mut project = Project::default();
+        let node = project.add_node("Narrow", [6., 40., 20.]);
+        let existing = project.add_port(node, PortKind::Jack35, "Audio").unwrap();
+        project
+            .port_mut(PortRef {
+                node,
+                port: existing,
+            })
+            .unwrap()
+            .uv = [0., 0.3];
+        let before = project.clone();
+        app.reset_document(project, None, false);
+        let out = interactive_frame(&ctx, &mut app, 0., vec![]);
+        let find = |out: &egui::FullOutput, label: &str| {
+            out.shapes
+                .iter()
+                .find_map(|s| match &s.shape {
+                    egui::Shape::Text(t) if t.galley.job.text == label => {
+                        Some(t.pos + t.galley.size() / 2.)
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let rotate = find(&out, "Rotate 90° clockwise");
+        interactive_frame(&ctx, &mut app, 0.1, vec![egui::Event::PointerMoved(rotate)]);
+        interactive_frame(&ctx, &mut app, 0.2, vec![pointer_button(rotate, true)]);
+        let out = interactive_frame(&ctx, &mut app, 0.3, vec![pointer_button(rotate, false)]);
+        assert_eq!(app.project, before);
+        assert!(!app.dirty());
+        assert!(app.undo.is_empty());
+        let tile = find(&out, "USB-A");
+        let target = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                egui::Shape::Path(path) if path.fill == Color32::from_rgb(74, 82, 91) => {
+                    Some(Rect::from_points(&path.points).center())
+                }
+                _ => None,
+            })
+            .unwrap();
+        interactive_frame(&ctx, &mut app, 0.4, vec![egui::Event::PointerMoved(tile)]);
+        interactive_frame(&ctx, &mut app, 0.5, vec![pointer_button(tile, true)]);
+        interactive_frame(&ctx, &mut app, 0.6, vec![egui::Event::PointerMoved(target)]);
+        interactive_frame(&ctx, &mut app, 0.7, vec![egui::Event::PointerMoved(target)]);
+        interactive_frame(&ctx, &mut app, 0.8, vec![pointer_button(target, false)]);
+        let ports = &app.project.node(node).unwrap().ports;
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].angle, 0.);
+        assert_eq!(ports[1].angle, 270.);
+        app.project.validate().unwrap();
+        assert_eq!(app.undo.len(), 1);
+        app.history(false);
+        assert_eq!(app.project, before);
+        let out = interactive_frame(&ctx, &mut app, 0.9, vec![]);
+        assert!(
+            painted_text(&out)
+                .iter()
+                .any(|t| t == "Next drop: 90° clockwise")
+        );
     }
     #[test]
     fn delete_from_context_menu_cleans_label_and_undo_restores_both() {
@@ -1515,7 +1439,7 @@ mod tests {
         );
         interactive_frame(&ctx, &mut a, 0., vec![]);
         let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
-        let editor = a.connect_ports.as_mut().unwrap();
+        let editor = a.port_label.as_mut().unwrap();
         assert_eq!(editor.target_node, Some(target.node));
         assert_eq!(editor.target_port, Some(target.port));
         assert!(
@@ -1524,8 +1448,8 @@ mod tests {
                 .any(|text| text.contains("Different connector families"))
         );
         editor.adapter = true;
-        assert!(a.connect_selected());
-        assert!(a.connect_ports.is_none());
+        assert!(a.save_connection());
+        assert!(a.port_label.is_none());
         assert_eq!(a.project.nodes.len(), 2);
         assert_eq!(a.project.connected_peer(source), Some(target));
         assert!(a.project.connection_at(source).unwrap().adapter);
@@ -1535,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn occupied_source_connect_modal_requires_disconnect_without_mutation() {
+    fn connection_context_opens_one_editor_with_both_connection_types() {
         let ctx = egui::Context::default();
         let (mut a, source, target) = free_devices();
         a.project
@@ -1549,13 +1473,250 @@ mod tests {
                 ..Default::default()
             },
         );
+        assert!(
+            a.port_label.is_some(),
+            "all connections use the same editor"
+        );
         interactive_frame(&ctx, &mut a, 0., vec![]);
         let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
+        let text = painted_text(&output);
+        assert!(text.iter().any(|text| text == "Equipment name"));
+        assert!(text.iter().any(|text| text == "Mapped device"));
         assert!(
-            painted_text(&output)
-                .iter()
-                .any(|text| text.contains("Disconnect it first"))
+            text.iter().any(|text| text.contains("Free HDMI")),
+            "current peer remains selectable"
         );
+        assert_eq!(a.project, before);
+        assert!(a.undo.is_empty());
+    }
+
+    #[test]
+    fn unified_editor_replaces_equipment_with_a_device_in_one_undo() {
+        let (mut a, source, target) = free_devices();
+        a.project.label_port(source, "Keyboard").unwrap();
+        let before = a.project.clone();
+        a.open_connect(source, Some(target.node));
+        let editor = a.port_label.as_mut().unwrap();
+        assert_eq!(editor.kind, port_label::ConnectionType::Mapped);
+        assert_eq!(editor.target_port, Some(target.port));
+        editor.adapter = true;
+        assert!(a.save_connection());
+        assert_eq!(a.project.connected_peer(source), Some(target));
+        assert!(a.project.endpoints.iter().all(|e| e.name != "Keyboard"));
+        assert!(a.project.endpoints.iter().any(|e| e.name == "Mouse"));
+        assert_eq!(a.undo.len(), 1);
+        a.history(false);
+        assert_eq!(a.project, before);
+    }
+
+    #[test]
+    fn unified_editor_replaces_mapped_device_with_equipment_and_can_undo() {
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let before = a.project.clone();
+        a.open_connect(source, None);
+        let editor = a.port_label.as_mut().unwrap();
+        editor.kind = port_label::ConnectionType::Equipment;
+        editor.text = "Gaming mouse".into();
+        assert!(a.save_connection());
+        assert_eq!(a.project.connected_peer(source), None);
+        assert_eq!(a.project.port_label(source), "Gaming mouse");
+        assert!(!a.project.is_occupied(target));
+        a.project.validate().unwrap();
+        a.history(false);
+        assert_eq!(a.project, before);
+    }
+
+    #[test]
+    fn incoming_mapped_flag_edit_preserves_direction_connection_id_and_label() {
+        let (mut a, source, target) = free_devices();
+        let id = a
+            .project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        a.project
+            .connections
+            .iter_mut()
+            .find(|c| c.id == id)
+            .unwrap()
+            .label = "Original cable".into();
+        let before = a.project.clone();
+        a.open_connect(target, None);
+        let editor = a.port_label.as_mut().unwrap();
+        assert_eq!(editor.target_node, Some(source.node));
+        assert_eq!(editor.target_port, Some(source.port));
+        editor.supplementary = true;
+        assert!(a.save_connection());
+        let connection = a.project.connection_at(target).unwrap();
+        assert_eq!(connection.id, id);
+        assert_eq!(connection.from, source);
+        assert_eq!(connection.to, Target::Port(target));
+        assert_eq!(connection.label, "Original cable");
+        assert!(connection.supplementary);
+        a.project.validate().unwrap();
+        a.history(false);
+        assert_eq!(a.project, before);
+    }
+
+    #[test]
+    fn unchanged_mapped_save_preserves_every_id_and_creates_no_undo() {
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let before = a.project.clone();
+        for port in [source, target] {
+            a.open_connect(port, None);
+            assert!(!a.has_drafts());
+            assert!(a.save_connection());
+            assert_eq!(a.project, before);
+            assert!(a.undo.is_empty());
+        }
+    }
+
+    #[test]
+    fn direct_equipment_rename_keeps_endpoint_and_connection_ids() {
+        let (mut a, source, _) = free_devices();
+        a.project.label_port(source, "Mouse").unwrap();
+        let connection = a.project.connection_at(source).unwrap().clone();
+        a.open_connect(source, None);
+        a.port_label.as_mut().unwrap().text = "Gaming mouse".into();
+        assert!(a.save_connection());
+        assert_eq!(a.project.connection_at(source), Some(&connection));
+        let Target::Endpoint(endpoint) = connection.to else {
+            panic!("equipment label");
+        };
+        assert_eq!(a.project.endpoint(endpoint).unwrap().name, "Gaming mouse");
+        assert_eq!(a.undo.len(), 1);
+    }
+
+    #[test]
+    fn failed_retarget_keeps_original_connection_other_occupants_and_draft() {
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let occupied = a.project.node(target.node).unwrap().ports[0].id;
+        let before = a.project.clone();
+        a.open_connect(source, None);
+        let editor = a.port_label.as_mut().unwrap();
+        editor.target_port = Some(occupied);
+        assert!(!a.save_connection());
+        assert_eq!(a.project, before);
+        assert_eq!(a.port_label.as_ref().unwrap().target_port, Some(occupied));
+        assert!(a.undo.is_empty());
+        assert!(a.error.is_some());
+        a.error = None;
+        let ctx = egui::Context::default();
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        assert_eq!(
+            a.port_label.as_ref().unwrap().target_port,
+            Some(occupied),
+            "rendering a failed draft must not rewrite it"
+        );
+    }
+
+    #[test]
+    fn incomplete_mapped_draft_blocks_save_and_continue_and_keeps_close_text() {
+        let (mut a, source, _) = free_devices();
+        a.project.label_port(source, "Keyboard").unwrap();
+        let before = a.project.clone();
+        a.open_connect(source, None);
+        let editor = a.port_label.as_mut().unwrap();
+        editor.kind = port_label::ConnectionType::Mapped;
+        editor.target_node = None;
+        editor.target_port = None;
+        let file =
+            std::env::temp_dir().join(format!("cable-ui-incomplete-{}.json", std::process::id()));
+        cleanup(&file);
+        a.path = Some(file.clone());
+        a.after_save = Some(Pending::Quit);
+        assert!(a.dirty());
+        a.save(false);
+        assert_eq!(a.project, before);
+        assert!(a.port_label.is_some());
+        assert_eq!(a.port_label.as_ref().unwrap().text, "Keyboard");
+        assert!(!a.closing);
+        assert!(a.error.is_some());
+        assert!(!file.exists());
+        assert!(a.after_save.is_none());
+    }
+
+    #[test]
+    fn mapped_retarget_releases_only_the_original_peer_and_is_undoable() {
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let third = a.project.add_node("Dock", [120., 60., 80.]);
+        let third_port = a
+            .project
+            .add_port(third, PortKind::UsbA, "New target")
+            .unwrap();
+        let new_target = PortRef {
+            node: third,
+            port: third_port,
+        };
+        let before = a.project.clone();
+        a.open_connect(source, Some(third));
+        assert!(a.save_connection());
+        assert_eq!(a.project.connected_peer(source), Some(new_target));
+        assert!(!a.project.is_occupied(target));
+        assert!(a.project.endpoints.iter().any(|e| e.name == "Mouse"));
+        assert_eq!(a.undo.len(), 1);
+        a.history(false);
+        assert_eq!(a.project, before);
+    }
+
+    #[test]
+    fn open_device_button_requires_saving_or_cancelling_a_changed_connection() {
+        let ctx = egui::Context::default();
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let before = a.project.clone();
+        a.open_connect(source, None);
+        let editor = a.port_label.as_mut().unwrap();
+        editor.kind = port_label::ConnectionType::Equipment;
+        editor.text = "Keep this draft".into();
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        let output = interactive_frame(&ctx, &mut a, 0.1, vec![]);
+        let button = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Text(text) if text.galley.job.text == "Open device" => {
+                    Some(text.pos + text.galley.size() / 2.)
+                }
+                _ => None,
+            })
+            .unwrap();
+        interactive_frame(&ctx, &mut a, 0.2, vec![egui::Event::PointerMoved(button)]);
+        interactive_frame(&ctx, &mut a, 0.3, vec![pointer_button(button, true)]);
+        interactive_frame(&ctx, &mut a, 0.4, vec![pointer_button(button, false)]);
+        assert_eq!(a.project, before);
+        assert_eq!(a.port_label.as_ref().unwrap().text, "Keep this draft");
+        assert!(a.undo.is_empty());
+    }
+
+    #[test]
+    fn cancelling_connection_editor_discards_only_the_draft() {
+        let ctx = egui::Context::default();
+        let (mut a, source, target) = free_devices();
+        a.project
+            .connect(source, Target::Port(target), false, true)
+            .unwrap();
+        let before = a.project.clone();
+        a.open_connect(source, None);
+        let editor = a.port_label.as_mut().unwrap();
+        editor.kind = port_label::ConnectionType::Equipment;
+        editor.text = "Do not keep me".into();
+        interactive_frame(&ctx, &mut a, 0., vec![]);
+        interactive_frame(&ctx, &mut a, 0.1, vec![key(Key::Escape)]);
+        assert!(a.port_label.is_none());
         assert_eq!(a.project, before);
         assert!(a.undo.is_empty());
     }

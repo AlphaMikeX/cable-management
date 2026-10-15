@@ -123,3 +123,42 @@ fn drop_selects_nearest_visible_building_block() {
         part
     );
 }
+
+#[test]
+fn pre_rotated_drop_fits_a_narrow_face_and_preserves_angle_on_reload() {
+    let mut project = Project::default();
+    let node = project.add_node("Portrait device", [6., 40., 20.]);
+    let part = project.node(node).unwrap().parts[0].id;
+    assert!(
+        project
+            .place_port(node, PortKind::UsbA, part, Face::Back, [0., 0.])
+            .is_err()
+    );
+    let id = project
+        .place_port_rotated(node, PortKind::UsbA, part, Face::Back, [0., 0.], 270.)
+        .unwrap();
+    let port = project.port(PortRef { node, port: id }).unwrap();
+    assert_eq!(port.angle, 270.);
+    assert!(port.fits_on(&project.node(node).unwrap().parts[0]));
+    let loaded: Project = serde_json::from_str(&serde_json::to_string(&project).unwrap()).unwrap();
+    assert_eq!(loaded, project);
+}
+
+#[test]
+fn invalid_rotated_drop_does_not_consume_ids_or_change_placed_ports() {
+    let mut project = Project::default();
+    let node = project.add_node("Thin device", [40., 6., 20.]);
+    let part = project.node(node).unwrap().parts[0].id;
+    project
+        .place_port(node, PortKind::UsbA, part, Face::Back, [0., 0.])
+        .unwrap();
+    let before = project.clone();
+    for angle in [90., 270., f32::NAN, f32::INFINITY] {
+        assert!(
+            project
+                .place_port_rotated(node, PortKind::UsbA, part, Face::Back, [0., 0.], angle)
+                .is_err()
+        );
+        assert_eq!(project, before);
+    }
+}

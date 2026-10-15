@@ -216,6 +216,21 @@ impl Project {
         face: Face,
         uv: [f32; 2],
     ) -> Result<Id, String> {
+        self.place_port_rotated(node, kind, part, face, uv, 0.)
+    }
+    /// Place a library connector at its chosen angle, validating the rotated fit atomically.
+    pub fn place_port_rotated(
+        &mut self,
+        node: Id,
+        kind: PortKind,
+        part: Id,
+        face: Face,
+        uv: [f32; 2],
+        angle: f32,
+    ) -> Result<Id, String> {
+        if !angle.is_finite() {
+            return Err("Port rotation must be finite.".into());
+        }
         if uv.iter().any(|v| !v.is_finite() || v.abs() > 0.5) {
             return Err("Drop the port on a visible device surface.".into());
         }
@@ -240,6 +255,7 @@ impl Project {
         port.part = part;
         port.face = face;
         port.uv = uv;
+        port.angle = angle.rem_euclid(360.);
         port.clamp_to_part(&body);
         candidate.validate()?;
         *self = candidate;

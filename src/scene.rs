@@ -1,3 +1,4 @@
+use crate::palette::PortDrag;
 use cable_management::ports::PortKind;
 use cable_management::{geometry::*, model::*};
 use eframe::egui::{self, Align2, Color32, FontId, Pos2, Rect, Sense, Shape, Stroke, Vec2};
@@ -125,6 +126,7 @@ pub struct SceneEvent {
 #[derive(Clone, Copy, Debug)]
 pub struct PortDrop {
     pub kind: PortKind,
+    pub angle: f32,
     pub hit: SurfaceHit,
 }
 
@@ -196,15 +198,11 @@ fn pick_socket(
 
 fn port_menu(response: &egui::Response, port: Id, event: &mut SceneEvent) {
     response.context_menu(|ui| {
-        if ui.button("Edit connection / Open device…").clicked() {
-            event.edit_label = Some(port);
-            ui.close();
-        }
         if ui.button("Rotate…").clicked() {
             event.rotate = Some(port);
             ui.close();
         }
-        if ui.button("Connect to device…").clicked() {
+        if ui.button("Connection…").clicked() {
             event.connect = Some(port);
             ui.close();
         }
@@ -220,7 +218,8 @@ fn port_menu(response: &egui::Response, port: Id, event: &mut SceneEvent) {
     });
 }
 
-fn drop_preview(node: &Node, kind: PortKind, hit: SurfaceHit, camera: &Camera) -> Option<Port> {
+fn drop_preview(node: &Node, payload: PortDrag, hit: SurfaceHit, camera: &Camera) -> Option<Port> {
+    let kind = payload.kind;
     let part = node.parts.iter().find(|p| p.id == hit.part)?;
     let mut port = Port {
         id: 0,
@@ -229,7 +228,7 @@ fn drop_preview(node: &Node, kind: PortKind, hit: SurfaceHit, camera: &Camera) -
         part: hit.part,
         face: hit.face,
         uv: hit.uv,
-        angle: 0.,
+        angle: payload.angle,
         metadata: String::new(),
         label_offset: None,
     };
@@ -530,11 +529,11 @@ pub fn draw(
             event.node_dropped = Some((socket.id, payload.node));
         }
     }
-    if editing && let Some(kind) = response.dnd_hover_payload::<PortKind>() {
+    if editing && let Some(payload) = response.dnd_hover_payload::<PortDrag>() {
         let candidate = pointer.and_then(|point| {
             let at = (point - center) / scale;
             let hit = surface_at(node, &state.camera, [at.x, at.y])?;
-            Some((hit, drop_preview(node, *kind, hit, &state.camera)?))
+            Some((hit, drop_preview(node, *payload, hit, &state.camera)?))
         });
         if let Some((hit, preview)) = &candidate {
             let part = node.parts.iter().find(|p| p.id == hit.part).unwrap();
@@ -559,10 +558,14 @@ pub fn draw(
         } else {
             ui.ctx().set_cursor_icon(egui::CursorIcon::NotAllowed);
         }
-        if response.dnd_release_payload::<PortKind>().is_some() {
+        if response.dnd_release_payload::<PortDrag>().is_some() {
             if let Some((mut hit, preview)) = candidate {
                 hit.uv = preview.uv;
-                event.dropped = Some(PortDrop { kind: *kind, hit });
+                event.dropped = Some(PortDrop {
+                    kind: payload.kind,
+                    angle: payload.angle,
+                    hit,
+                });
             } else {
                 event.drop_rejected = true;
             }
@@ -1351,7 +1354,7 @@ mod tests {
         let camera = Camera::for_face(Face::Back);
         let hit = surface_at(node, &camera, [49., 0.]).unwrap();
         assert_eq!(hit.part, node.parts[0].id);
-        assert!(drop_preview(node, PortKind::Xlr, hit, &camera).is_none());
+        assert!(drop_preview(node, PortDrag::new(PortKind::Xlr, 0), hit, &camera).is_none());
     }
     #[test]
     fn exact_socket_hit_beats_a_selected_neighbour_within_click_tolerance() {
@@ -1430,6 +1433,20 @@ mod tests {
                 });
             },
         );
+        let menu_text: Vec<_> = output
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                Shape::Text(t) => Some(t.galley.job.text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(menu_text.iter().filter(|t| **t == "Connection…").count(), 1);
+        assert!(
+            !menu_text
+                .iter()
+                .any(|t| t.contains("Edit connection") || t.contains("Connect to device"))
+        );
         let point = output
             .shapes
             .iter()
@@ -1493,6 +1510,41 @@ mod tests {
         result
     }
     #[test]
+    fn rotated_payload_preview_and_drop_use_the_same_angle_on_a_narrow_surface() {
+        let mut project = Project::default();
+        project.add_node("Narrow", [6., 40., 20.]);
+        let ctx = egui::Context::default();
+        let mut state = ViewState::default();
+        let at = Pos2::new(400., 300.);
+        rendered(
+            &ctx,
+            &project,
+            &mut state,
+            0.,
+            vec![egui::Event::PointerMoved(at)],
+        );
+        rendered(&ctx, &project, &mut state, 0.1, vec![press(at, true)]);
+        egui::DragAndDrop::set_payload(&ctx, PortDrag::new(PortKind::UsbA, 1));
+        let (_, out) = rendered(&ctx, &project, &mut state, 0.2, vec![]);
+        let bounds = out
+            .shapes
+            .iter()
+            .find_map(|s| match &s.shape {
+                Shape::Path(p) if p.fill == Color32::from_rgba_unmultiplied(99, 221, 180, 50) => {
+                    Some(Rect::from_points(&p.points))
+                }
+                _ => None,
+            })
+            .expect("vertical connector fits in the narrow visible face");
+        assert!(bounds.height() > bounds.width() * 2.);
+        let (event, _) = rendered(&ctx, &project, &mut state, 0.3, vec![press(at, false)]);
+        let drop = event.dropped.unwrap();
+        assert_eq!(drop.kind, PortKind::UsbA);
+        assert_eq!(drop.angle, 270.);
+        assert_eq!(drop.hit.face, Face::Back);
+        assert!(project.nodes[0].ports.is_empty());
+    }
+    #[test]
     fn native_drag_payload_drops_on_the_visible_device_face() {
         let mut p = Project::default();
         p.add_node("PC", [200., 300., 200.]);
@@ -1518,7 +1570,7 @@ mod tests {
                 modifiers: egui::Modifiers::NONE,
             }],
         );
-        egui::DragAndDrop::set_payload(&ctx, PortKind::UsbC);
+        egui::DragAndDrop::set_payload(&ctx, PortDrag::new(PortKind::UsbC, 0));
         let result = frame(
             &ctx,
             &p,

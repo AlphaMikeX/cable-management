@@ -34,13 +34,17 @@ fn main() -> eframe::Result<()> {
             let mut annotated = p.clone();
             let node = annotated.nodes[0].id;
             let part = annotated.nodes[0].parts[0].id;
-            let port = annotated.place_port(
+            let port = annotated.place_port_rotated(
                 node,
                 cable_management::ports::PortKind::UsbC,
                 part,
                 Face::Front,
                 [0., 0.],
+                270.,
             )?;
+            if annotated.port(PortRef { node, port }).unwrap().angle != 270. {
+                return Err("Pre-rotated placement mismatch".into());
+            }
             annotated.label_port(PortRef { node, port }, "gamingmus")?;
             if annotated.nodes.len() != p.nodes.len() {
                 return Err("Text label created a node".into());
