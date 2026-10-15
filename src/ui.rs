@@ -1647,7 +1647,7 @@ impl CableApp {
     }
 
     fn dialogs(&mut self, ctx: &egui::Context) {
-        if self.error.is_none() {
+        if self.error.is_none() && self.pending.is_none() && self.file_dialog.is_none() {
             let action = self
                 .port_label
                 .as_mut()
@@ -1809,6 +1809,40 @@ fn section(ui: &mut egui::Ui, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn close_confirmation_keeps_unfinished_equipment_text_when_escape_is_pressed() {
+        let ctx = egui::Context::default();
+        let mut app = CableApp::from_context(&ctx, None);
+        app.reset_document(Project::demo(), None, false);
+        let node = app.project.nodes[0].id;
+        let port = app.project.nodes[0].ports[1].id;
+        app.apply_scene_event(
+            node,
+            scene::SceneEvent {
+                edit_label: Some(port),
+                ..Default::default()
+            },
+        );
+        app.port_label.as_mut().unwrap().text = "gamingmus".into();
+        app.begin(Pending::Quit);
+        assert!(app.pending.is_some());
+        interactive_frame(
+            &ctx,
+            &mut app,
+            0.,
+            vec![egui::Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Modifiers::NONE,
+            }],
+        );
+        assert_eq!(
+            app.port_label.as_ref().map(|e| e.text.as_str()),
+            Some("gamingmus")
+        );
+    }
     fn interactive_frame(
         ctx: &egui::Context,
         app: &mut CableApp,

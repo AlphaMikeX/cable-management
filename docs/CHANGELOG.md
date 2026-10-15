@@ -9,4 +9,4 @@
 - Dropping on empty space, a surface too small for the connector, or a clamped position hidden by another building block does not modify the document.
 - Existing project format version 1 is unchanged. Node, port, cable and endpoint identities remain compatible with 0.1.0 projects.
 
-Verification includes 40 automated tests: native palette-to-canvas drag, double-click text entry, context-menu Delete, undo, fixed mouse orientation, all six surface projections, fit/occlusion, graph integrity and local file roundtrips. Windows CI also builds the native executable and runs its expanded persistence/label self-test.
+Verification includes 41 automated tests: native palette-to-canvas drag, double-click text entry, context-menu Delete, undo, fixed mouse orientation, all six surface projections, fit/occlusion, pending text during close confirmation, graph integrity and local file roundtrips. Windows CI also builds the native executable and runs its expanded persistence/label self-test.
